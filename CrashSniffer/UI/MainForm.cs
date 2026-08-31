@@ -34,6 +34,8 @@ public class MainForm : Form
     private readonly TabControl _rootTabs = new() { Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 9) };
     private readonly TabPage _tabEvents = new("崩溃事件") { BackColor = Color.FromArgb(248, 250, 252) };
     private readonly TabPage _tabHistory = new("历史趋势") { BackColor = Color.FromArgb(248, 250, 252) };
+    private readonly TabPage _tabEnvHistory = new("环境变更") { BackColor = Color.FromArgb(248, 250, 252) };
+    private readonly EnvironmentHistoryTab _envHistoryTab = new();
     private readonly HistoryTab _historyTab = new();
     private readonly DataGridView _grid = new() { Dock = DockStyle.Fill, AutoGenerateColumns = false, AllowUserToAddRows = false, AllowUserToDeleteRows = false, SelectionMode = DataGridViewSelectionMode.FullRowSelect, MultiSelect = false, ReadOnly = true, RowHeadersVisible = false, BackgroundColor = Color.FromArgb(245, 248, 252), GridColor = Color.FromArgb(220, 228, 238), AlternatingRowsDefaultCellStyle = new DataGridViewCellStyle { BackColor = Color.FromArgb(252, 254, 255) } };
     private readonly TabControl _tabs = new() { Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 9) };
@@ -42,6 +44,8 @@ public class MainForm : Form
     private readonly TabPage _tabSuggest = new("排障建议") { BackColor = Color.White };
     private readonly TabPage _tabRelated = new("关联事件") { BackColor = Color.White };
     private readonly TabPage _tabRaw = new("原始消息") { BackColor = Color.White };
+    private readonly TabPage _tabChanges = new("事发前变更") { BackColor = Color.White };
+    private readonly RichTextBox _tbChanges = new() { Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 10), BackColor = Color.White, ReadOnly = true, BorderStyle = BorderStyle.None, ScrollBars = RichTextBoxScrollBars.Vertical };
 
     private readonly RichTextBox _tbBsod = new() { Dock = DockStyle.Fill, Font = new Font("Consolas", 10), BackColor = Color.White, ReadOnly = true, BorderStyle = BorderStyle.None };
     private readonly RichTextBox _tbWhea = new() { Dock = DockStyle.Fill, Font = new Font("Consolas", 10), BackColor = Color.White, ReadOnly = true, BorderStyle = BorderStyle.None };
@@ -62,6 +66,8 @@ public class MainForm : Form
     private int _liveCount;
     /// <summary>最近一次扫描的环境快照（WMI 后台采集），导出报告时附带</summary>
     private EnvironmentSnapshot? _envSnapshot;
+    /// <summary>环境变更记录缓存（详情页「事发前变更」关联展示用）</summary>
+    private List<EnvironmentChange> _envChanges = new();
     /// <summary>SetQuickRange 期间抑制 DateTimePicker 的 ValueChanged 触发重复扫描</summary>
     private bool _suppressRangeEvents;
     private readonly Color _bsodColor = Color.FromArgb(0x1d, 0x4e, 0xd9);
@@ -83,6 +89,9 @@ public class MainForm : Form
 
         BuildUi();
         BindEvents();
+
+        // 启动时加载环境变更缓存（供详情页关联展示）
+        try { _envChanges = EnvironmentHistoryStore.LoadChanges(); } catch { }
 
         // 默认近30天
         SetQuickRange(TimePreset.Last30Days);
@@ -160,7 +169,8 @@ public class MainForm : Form
         _tabSuggest.Controls.Add(_tbSuggest);
         _tabRelated.Controls.Add(_gridRelated);
         _tabRaw.Controls.Add(_tbRaw);
-        _tabs.TabPages.AddRange(new[] { _tabBsod, _tabWhea, _tabSuggest, _tabRelated, _tabRaw });
+        _tabChanges.Controls.Add(_tbChanges);
+        _tabs.TabPages.AddRange(new[] { _tabBsod, _tabWhea, _tabSuggest, _tabChanges, _tabRelated, _tabRaw });
 
         // 关联事件列
         _gridRelated.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "时间", Width = 95, DataPropertyName = "Time", DefaultCellStyle = new DataGridViewCellStyle { Format = "HH:mm:ss.fff", Font = new Font("Consolas", 9) } });
@@ -174,7 +184,8 @@ public class MainForm : Form
         _split.Panel2.Controls.Add(_tabs);
         _tabEvents.Controls.Add(_split);
         _tabHistory.Controls.Add(_historyTab);
-        _rootTabs.TabPages.AddRange(new[] { _tabEvents, _tabHistory });
+        _tabEnvHistory.Controls.Add(_envHistoryTab);
+        _rootTabs.TabPages.AddRange(new[] { _tabEvents, _tabHistory, _tabEnvHistory });
 
         Controls.Add(_rootTabs);
         Controls.Add(_topToolStrip);
@@ -284,7 +295,13 @@ public class MainForm : Form
                 {
                     var snap = await Task.Run(() => CrashSniffer.Collectors.EnvironmentCollector.Collect());
                     _envSnapshot = snap;
-                    SetStatusText($"环境快照采集完成：{snap.Gpus.Count} 个 GPU · 内存诊断：{snap.MemoryDiag.Display}");
+                    int newChanges = EnvironmentHistoryStore.RecordSnapshot(snap);
+                    _envChanges = EnvironmentHistoryStore.LoadChanges();
+                    if (InvokeRequired) BeginInvoke(() => _envHistoryTab.OnScanCompleted());
+                    else _envHistoryTab.OnScanCompleted();
+                    SetStatusText(newChanges > 0
+                        ? $"环境快照采集完成：检测到 {newChanges} 项环境变更，见「环境变更」页"
+                        : $"环境快照采集完成：{snap.Gpus.Count} 个 GPU · 内存诊断：{snap.MemoryDiag.Display}");
                 }
                 catch { /* 快照失败不影响主流程 */ }
             });
@@ -422,6 +439,33 @@ public class MainForm : Form
                 row.DefaultCellStyle.ForeColor = Color.FromArgb(0xc2, 0x41, 0x0c);
         }
 
+        // 事发前变更
+        var ch = _tbChanges;
+        ch.Clear();
+        var before = _envChanges.Where(c => c.Time <= ev.Time).OrderByDescending(c => c.Time).ToList();
+        if (before.Count == 0)
+        {
+            AppendLine(ch, _envChanges.Count == 0
+                ? "尚无环境变更记录（从首次扫描起开始记录）。\n定期扫描后，崩溃前更换驱动 / 刷 BIOS / 改内存频率等变更会显示在这里。"
+                : "该崩溃发生前未检测到环境变更。", Color.Gray);
+        }
+        else
+        {
+            AppendLine(ch, $"🕐 事发前环境变更（共 {before.Count} 项）", Color.FromArgb(0x1d, 0x4e, 0xd9), bold: true, 13);
+            AppendLine(ch, "注：变更只能定位到两次扫描之间，精确时刻不可知。", Color.Gray);
+            AppendLine(ch, "─────────────────────────────", Color.Gray);
+            int show = Math.Min(10, before.Count);
+            for (int i = 0; i < show; i++)
+            {
+                var c = before[i];
+                AppendLine(ch, $"{RelativeBefore(ev.Time, c.Time)} · {EnvironmentHistoryTab.CategoryLabel(c.Category)}",
+                    Color.FromArgb(0x1e, 0x3a, 0x8a), bold: true);
+                AppendLine(ch, $"  {c.Item}:  {c.OldValue}  →  {c.NewValue}", Color.FromArgb(0x1f, 0x29, 0x37));
+            }
+            if (before.Count > show)
+                AppendLine(ch, $"…另有 {before.Count - show} 条，见「环境变更」页", Color.Gray);
+        }
+
         // 原始消息
         _tbRaw.Clear();
         if (string.IsNullOrWhiteSpace(ev.EventMessage))
@@ -436,7 +480,7 @@ public class MainForm : Form
 
     private void ClearDetail()
     {
-        foreach (var tb in new[] { _tbBsod, _tbWhea, _tbSuggest, _tbRaw }) tb.Clear();
+        foreach (var tb in new[] { _tbBsod, _tbWhea, _tbSuggest, _tbRaw, _tbChanges }) tb.Clear();
         _gridRelated.Rows.Clear();
     }
 
@@ -467,7 +511,9 @@ public class MainForm : Form
             }
             var ranking = CrashAggregator.BuildSuspectRanking(_events);
 
-            var result = ReportExporter.Export(dlg.FileName, _events, _dtpStart.Value, _dtpEnd.Value, env, ranking);
+            EnvironmentHistoryData envHistory;
+            try { envHistory = EnvironmentHistoryStore.Load(); } catch { envHistory = new EnvironmentHistoryData(); }
+            var result = ReportExporter.Export(dlg.FileName, _events, _dtpStart.Value, _dtpEnd.Value, env, ranking, envHistory);
             SetBusy(false, result.Success ? $"报告包导出成功：{dlg.FileName}" : $"导出失败：{result.ErrorMessage}");
 
             if (!result.Success)
@@ -503,6 +549,15 @@ public class MainForm : Form
     {
         var key = (template.FontFamily.Name, size, bold);
         return _fontCache.GetOrAdd(key, k => new Font(k.family, k.size, bold ? FontStyle.Bold : FontStyle.Regular));
+    }
+
+    /// <summary>变更时间相对崩溃时间的表述，如 "崩溃前 3 天"</summary>
+    private static string RelativeBefore(DateTime crash, DateTime change)
+    {
+        var span = crash - change;
+        if (span <= TimeSpan.Zero) return "崩溃同时";
+        if (span.TotalDays >= 1) return $"崩溃前 {(int)span.TotalDays} 天";
+        return $"崩溃前 {Math.Max(1, (int)span.TotalHours)} 小时";
     }
 
     private void SetBusy(bool busy, string statusText)

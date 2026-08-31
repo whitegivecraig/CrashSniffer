@@ -30,7 +30,8 @@ public static class ReportExporter
     /// 导出报告到指定 zip 路径
     /// </summary>
     public static ExportResult Export(string zipPath, List<CrashEvent> events, DateTime startTime, DateTime endTime,
-        EnvironmentSnapshot? env = null, List<SuspectRankEntry>? suspectRanking = null)
+        EnvironmentSnapshot? env = null, List<SuspectRankEntry>? suspectRanking = null,
+        EnvironmentHistoryData? envHistory = null)
     {
         var result = new ExportResult();
         try
@@ -53,6 +54,14 @@ public static class ReportExporter
                     string envPath = Path.Combine(tempDir, "environment.json");
                     File.WriteAllText(envPath, JsonSerializer.Serialize(env, JsonOpts), Encoding.UTF8);
                     result.FilesIncluded.Add("environment.json");
+                }
+
+                // 1.6 environment_history.json (环境变更历史)
+                if (envHistory != null)
+                {
+                    string envHistPath = Path.Combine(tempDir, "environment_history.json");
+                    File.WriteAllText(envHistPath, JsonSerializer.Serialize(envHistory, JsonOpts), Encoding.UTF8);
+                    result.FilesIncluded.Add("environment_history.json");
                 }
 
                 // 2. dumps 目录
@@ -88,7 +97,7 @@ public static class ReportExporter
 
                 // 3. report.html
                 string htmlPath = Path.Combine(tempDir, "report.html");
-                File.WriteAllText(htmlPath, BuildHtml(events, startTime, endTime, result, env, suspectRanking), Encoding.UTF8);
+                File.WriteAllText(htmlPath, BuildHtml(events, startTime, endTime, result, env, suspectRanking, envHistory), Encoding.UTF8);
                 result.FilesIncluded.Insert(0, "report.html");
 
                 // 4. 打包
@@ -122,7 +131,8 @@ public static class ReportExporter
     // —— HTML 生成 ——
 
     private static string BuildHtml(List<CrashEvent> events, DateTime start, DateTime end, ExportResult progress,
-        EnvironmentSnapshot? env = null, List<SuspectRankEntry>? suspectRanking = null)
+        EnvironmentSnapshot? env = null, List<SuspectRankEntry>? suspectRanking = null,
+        EnvironmentHistoryData? envHistory = null)
     {
         var sb = new StringBuilder();
         sb.AppendLine("<!DOCTYPE html><html lang=\"zh-CN\"><head>");
@@ -211,6 +221,27 @@ public static class ReportExporter
                 sb.AppendLine("</div>");
             }
 
+            // 事发前变更
+            if (envHistory is { Changes.Count: > 0 })
+            {
+                var before = envHistory.Changes.Where(c => c.Time <= ev.Time)
+                    .OrderByDescending(c => c.Time).ToList();
+                if (before.Count > 0)
+                {
+                    sb.AppendLine("<div class=\"card\"><h3 style=\"margin:0 0 6px;color:var(--accent);font-size:15px\">🕐 事发前环境变更</h3>");
+                    sb.AppendLine("<p class=\"meta\" style=\"margin:0 0 8px\">变更只能定位到两次扫描之间，精确时刻不可知</p>");
+                    int show = Math.Min(10, before.Count);
+                    for (int k = 0; k < show; k++)
+                    {
+                        var c = before[k];
+                        sb.AppendLine($"<div class=\"row\"><span class=\"k\">{Escape(RelativeBefore(ev.Time, c.Time))}</span><span class=\"v\">{Escape(c.Item)}（{CategoryName(c.Category)}）：<span class=\"mono\">{Escape(c.OldValue)}</span> → <span class=\"mono warn\">{Escape(c.NewValue)}</span></span></div>");
+                    }
+                    if (before.Count > show)
+                        sb.AppendLine($"<p class=\"meta\" style=\"margin:8px 0 0\">另有 {before.Count - show} 条更早变更，见文末「环境变更时间线」。</p>");
+                    sb.AppendLine("</div>");
+                }
+            }
+
             // 原始消息
             if (!string.IsNullOrWhiteSpace(ev.EventMessage))
             {
@@ -249,6 +280,25 @@ public static class ReportExporter
             foreach (var s in progress.SkippedDumps)
                 sb.AppendLine($"<li>{Escape(s)}</li>");
             sb.AppendLine("</ul></section>");
+        }
+
+        // 环境变更时间线（完整章节）
+        if (envHistory != null)
+        {
+            if (envHistory.Changes.Count > 0)
+            {
+                sb.AppendLine("<section class=\"stat\"><h3 style=\"margin:0 0 10px;color:var(--accent)\">🕐 环境变更时间线</h3>");
+                sb.AppendLine("<table class=\"rel-tbl\"><thead><tr><th>检测时间</th><th>类别</th><th>项目</th><th>旧值</th><th>新值</th></tr></thead><tbody>");
+                foreach (var c in envHistory.Changes.OrderByDescending(c => c.Time))
+                    sb.AppendLine($"<tr><td>{c.Time:yyyy-MM-dd HH:mm}</td><td>{CategoryName(c.Category)}</td><td>{Escape(c.Item)}</td><td class=\"mono\">{Escape(c.OldValue)}</td><td class=\"mono warn\">{Escape(c.NewValue)}</td></tr>");
+                sb.AppendLine("</tbody></table>");
+                sb.AppendLine($"<p class=\"meta\" style=\"margin:8px 0 0\">共 {envHistory.Changes.Count} 条变更 · {envHistory.Snapshots.Count} 份环境快照</p>");
+                sb.AppendLine("</section>");
+            }
+            else if (envHistory.Snapshots.Count > 0)
+            {
+                sb.AppendLine("<section class=\"stat\"><h3 style=\"margin:0 0 10px;color:var(--accent)\">🕐 环境变更时间线</h3><p class=\"meta\">已有环境快照记录，暂未检测到任何变更。</p></section>");
+            }
         }
 
         sb.AppendLine("<footer><p>CrashSniffer v2.0 · 本报告由工具自动生成，建议结合 WinDbg 深入分析。</p></footer>");
@@ -305,6 +355,26 @@ public static class ReportExporter
         CrashType.LiveKernel => "🧩 LiveKernel 挂死 (未蓝屏)",
         _ => t.ToString(),
     };
+
+    private static string CategoryName(ChangeCategory c) => c switch
+    {
+        ChangeCategory.Bios => "BIOS",
+        ChangeCategory.WindowsUpdate => "Windows 更新",
+        ChangeCategory.GpuDriver => "显卡驱动",
+        ChangeCategory.MemorySpeed => "内存频率",
+        ChangeCategory.PlatformDriver => "芯片组驱动",
+        ChangeCategory.Hardware => "硬件变更",
+        ChangeCategory.MemoryDiag => "内存诊断",
+        _ => c.ToString(),
+    };
+
+    private static string RelativeBefore(DateTime crash, DateTime change)
+    {
+        var span = crash - change;
+        if (span <= TimeSpan.Zero) return "崩溃同时";
+        if (span.TotalDays >= 1) return $"崩溃前 {(int)span.TotalDays} 天";
+        return $"崩溃前 {Math.Max(1, (int)span.TotalHours)} 小时";
+    }
 
     private static string Escape(string s)
     {
