@@ -14,6 +14,43 @@ public class EnvironmentChangeDetectorTests
         Assert.Empty(changes);
     }
 
+    /// <summary>相同内容 → 相同指纹</summary>
+    [Fact]
+    public void FingerprintOf_IdenticalContent_SameFingerprint()
+    {
+        Assert.Equal(
+            EnvironmentChangeDetector.FingerprintOf(BaseSnapshot()),
+            EnvironmentChangeDetector.FingerprintOf(BaseSnapshot()));
+    }
+
+    /// <summary>驱动版本变化 → 指纹不同</summary>
+    [Fact]
+    public void FingerprintOf_DriverVersionChanged_DifferentFingerprint()
+    {
+        var a = BaseSnapshot();
+        var b = BaseSnapshot();
+        b.Gpus[0].DriverVersion = "32.0.23013";
+        Assert.NotEqual(
+            EnvironmentChangeDetector.FingerprintOf(a),
+            EnvironmentChangeDetector.FingerprintOf(b));
+    }
+
+    /// <summary>一侧 GPU 列表为空（模拟 WMI 采集失败）→ 空侧不参与指纹，不误判</summary>
+    [Fact]
+    public void FingerprintOf_EmptyGpuSection_Ignored()
+    {
+        var a = BaseSnapshot();
+        var b = BaseSnapshot();
+        b.Gpus.Clear();
+        b.CollectErrors.Add("GPU 采集失败");
+        // 一侧为空时按"无该类别数据"处理：与去掉 GPU 段的指纹比较
+        var c = BaseSnapshot();
+        c.Gpus.Clear();
+        Assert.Equal(
+            EnvironmentChangeDetector.FingerprintOf(b),
+            EnvironmentChangeDetector.FingerprintOf(c));
+    }
+
     /// <summary>构造一份"完整"的基准快照，所有类别均有数据</summary>
     internal static EnvironmentSnapshot BaseSnapshot() => new()
     {
