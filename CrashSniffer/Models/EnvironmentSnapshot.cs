@@ -70,8 +70,8 @@ public class EnvironmentSnapshot
     public string OsDisplayVersion { get; set; } = string.Empty;
     public string OsBuild { get; set; } = string.Empty;
 
-    public List<GpuInfo> Gpus { get; } = new();
-    public List<MemoryStickInfo> MemorySticks { get; } = new();
+    public List<GpuInfo> Gpus { get; set; } = new();
+    public List<MemoryStickInfo> MemorySticks { get; set; } = new();
 
     /// <summary>内存总量与频率摘要</summary>
     public string MemorySummary { get; set; } = string.Empty;
@@ -79,10 +79,10 @@ public class EnvironmentSnapshot
     /// <summary>XMP/EXPO 状态推断说明</summary>
     public string XmpNote { get; set; } = string.Empty;
 
-    public List<PlatformDriverInfo> PlatformDrivers { get; } = new();
+    public List<PlatformDriverInfo> PlatformDrivers { get; set; } = new();
 
-    public MemoryDiagResult MemoryDiag { get; } = new();
+    public MemoryDiagResult MemoryDiag { get; set; } = new();
 
     /// <summary>采集失败的子项说明（WMI 查询失败等），不阻断整体</summary>
-    public List<string> CollectErrors { get; } = new();
+    public List<string> CollectErrors { get; set; } = new();
 }
