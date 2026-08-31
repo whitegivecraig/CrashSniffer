@@ -36,7 +36,7 @@
 ### 运行要求
 - Windows 10 / 11（x64）
 - **管理员权限**（读取 MEMORY.DMP 与系统事件日志必需，程序会自动请求 UAC 提权）
-- Release 附带的自包含发布版无需安装 .NET；从源码构建需要 [.NET 8 SDK](https://dotnet.microsoft.com/download/dotnet/8.0)
+- Release 附带的 zip 为框架依赖式发布，需安装 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)；从源码自行构建需要 .NET 8 SDK
 
 ### 使用方法
 1. 以管理员身份运行 `CrashSniffer.exe`
