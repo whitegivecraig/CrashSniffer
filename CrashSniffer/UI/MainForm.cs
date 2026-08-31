@@ -62,6 +62,8 @@ public class MainForm : Form
     private int _liveCount;
     /// <summary>最近一次扫描的环境快照（WMI 后台采集），导出报告时附带</summary>
     private EnvironmentSnapshot? _envSnapshot;
+    /// <summary>SetQuickRange 期间抑制 DateTimePicker 的 ValueChanged 触发重复扫描</summary>
+    private bool _suppressRangeEvents;
     private readonly Color _bsodColor = Color.FromArgb(0x1d, 0x4e, 0xd9);
     private readonly Color _wheaColor = Color.FromArgb(0xc2, 0x41, 0x0c);
     private readonly Color _tdrColor = Color.FromArgb(0x6d, 0x28, 0xd9);
@@ -191,8 +193,8 @@ public class MainForm : Form
         _btnRefresh.Click += (_, _) => RefreshScan();
         _btnExport.Click += (_, _) => DoExport();
 
-        _dtpStart.ValueChanged += (_, _) => RefreshScan();
-        _dtpEnd.ValueChanged += (_, _) => RefreshScan();
+        _dtpStart.ValueChanged += (_, _) => { if (!_suppressRangeEvents) RefreshScan(); };
+        _dtpEnd.ValueChanged += (_, _) => { if (!_suppressRangeEvents) RefreshScan(); };
 
         _grid.SelectionChanged += (_, _) => UpdateDetail();
     }
@@ -219,12 +221,22 @@ public class MainForm : Form
                 break;
             case TimePreset.All:
             default:
-                start = DateTime.MinValue;
-                end = DateTime.MaxValue;
+                // DateTime.MinValue(0001年) 低于 DateTimePicker.MinDate(1753年) 会抛
+                // ArgumentOutOfRangeException，这里用控件自身的边界值
+                start = DateTimePicker.MinimumDateTime;
+                end = DateTimePicker.MaximumDateTime;
                 break;
         }
-        _dtpStart.Value = start;
-        _dtpEnd.Value = end;
+        _suppressRangeEvents = true;
+        try
+        {
+            _dtpStart.Value = start;
+            _dtpEnd.Value = end;
+        }
+        finally
+        {
+            _suppressRangeEvents = false;
+        }
     }
 
     private async Task AutoFirstScan()
@@ -484,6 +496,15 @@ public class MainForm : Form
 
     // —— 通用工具 ——
 
+    /// <summary>SelectionFont 缓存：RichTextBox 每行赋 Font 不释放会泄漏 GDI 句柄，统一缓存复用</summary>
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<(string family, float size, bool bold), Font> _fontCache = new();
+
+    internal static Font GetCachedFont(Font template, float size, bool bold)
+    {
+        var key = (template.FontFamily.Name, size, bold);
+        return _fontCache.GetOrAdd(key, k => new Font(k.family, k.size, bold ? FontStyle.Bold : FontStyle.Regular));
+    }
+
     private void SetBusy(bool busy, string statusText)
     {
         _btnRefresh.Enabled = !busy;
@@ -522,7 +543,7 @@ public class MainForm : Form
         tb.AppendText(text + "\n");
         tb.Select(start, tb.TextLength - start);
         if (color.HasValue) tb.SelectionColor = color.Value;
-        tb.SelectionFont = new Font(tb.Font.FontFamily, fontSize > 0 ? fontSize : tb.Font.Size, bold ? FontStyle.Bold : FontStyle.Regular);
+        tb.SelectionFont = GetCachedFont(tb.Font, fontSize > 0 ? fontSize : tb.Font.Size, bold);
         tb.SelectionStart = tb.TextLength;
         tb.SelectionLength = 0;
     }

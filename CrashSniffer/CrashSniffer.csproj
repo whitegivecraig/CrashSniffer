@@ -10,14 +10,14 @@
     <AssemblyName>CrashSniffer</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
-    <Version>2.0.0</Version>
+    <Version>2.0.1</Version>
     <Authors>CrashSniffer</Authors>
     <Product>Windows 系统崩溃信息抓取工具</Product>
     <Description>崩溃重启后快速采集 BSOD/WHEA/TDR/LiveKernel/事件日志并生成报告</Description>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Text.Json" Version="8.0.0" />
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
     <PackageReference Include="System.Diagnostics.EventLog" Version="8.0.0" />
     <PackageReference Include="System.Management" Version="8.0.0" />
   </ItemGroup>

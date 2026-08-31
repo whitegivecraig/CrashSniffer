@@ -36,14 +36,13 @@ https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 https://github.com/dotnet/core/blob/main/LICENSE.TXT
 
 -----------------------------------------------------------------------
-2. System.Text.Json (NuGet 包 v8.0.0)
+2. System.Text.Json (NuGet 包 v8.0.5)
 -----------------------------------------------------------------------
 
 组件名称：System.Text.Json
 版权所有：Copyright (c) .NET Foundation and Contributors
 许可协议：MIT License
 来源：https://www.nuget.org/packages/System.Text.Json/
-
 许可文本同上（MIT License）。
 完整许可文本见：
 https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
@@ -62,10 +61,23 @@ https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 
 -----------------------------------------------------------------------
+4. System.Management (NuGet 包 v8.0.0)
+-----------------------------------------------------------------------
+
+组件名称：System.Management
+版权所有：Copyright (c) .NET Foundation and Contributors
+许可协议：MIT License
+来源：https://www.nuget.org/packages/System.Management/
+
+许可文本同上（MIT License）。
+完整许可文本见：
+https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
+
+-----------------------------------------------------------------------
 说明
 -----------------------------------------------------------------------
 
-以上三个组件均为 MIT 许可协议。MIT 许可允许在闭源/商业产品中使用、修改
+以上四个组件均为 MIT 许可协议。MIT 许可允许在闭源/商业产品中使用、修改
 和再分发上述组件，唯一条件是在分发时保留原始版权与许可声明，即本文件
 所包含的内容。
 

@@ -354,7 +354,7 @@ public class HistoryTab : UserControl
         tb.AppendText(text + "\n");
         tb.Select(start, tb.TextLength - start);
         tb.SelectionColor = color;
-        tb.SelectionFont = new Font(tb.Font.FontFamily, tb.Font.Size, bold ? FontStyle.Bold : FontStyle.Regular);
+        tb.SelectionFont = MainForm.GetCachedFont(tb.Font, tb.Font.Size, bold);
         tb.SelectionStart = tb.TextLength;
         tb.SelectionLength = 0;
     }

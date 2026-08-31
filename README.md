@@ -68,6 +68,20 @@ dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-con
 
 本项目基于 .NET 8 运行时，使用 System.Text.Json、System.Diagnostics.EventLog、System.Management（均为 MIT 许可），详见 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)。
 
+## 📝 更新日志
+
+### v2.0.1
+- **修复**：点击「全部」时间范围时崩溃（`DateTimePicker` 越界异常），现在正确使用控件自身的日期边界
+- **修复**：切换时间范围会触发两次重复扫描的问题
+- **修复**：事件日志读取时的原生句柄泄漏（`EventRecord` 未释放）
+- **修复**：详情面板反复点击导致的 GDI 字体句柄泄漏（改用字体缓存）
+- **内存**：WHEA 事件采集过滤为 Warning 及以上，排除高频"已纠正"错误洪泛；单次扫描收录上限 5000 条
+- **内存**：崩溃事件聚合窗口加 2 小时硬上限，合并消息加长度上限，防止高频事件导致内存与 CPU 失控
+- **合规**：第三方声明文件补登 System.Management；升级 System.Text.Json 至 8.0.5 修复已知高危漏洞（GHSA-8g4q-xg66-9fp4 / GHSA-hh2w-p6rv-4g7w）
+
+### v2.0.0
+- 首个公开发布版本：BSOD / WHEA / TDR / LiveKernel / 事件日志采集、停止代码知识库、嫌疑驱动排行、历史趋势与 A/B 对比、zip 报告导出
+
 ## 📝 许可证
 
 [MIT](LICENSE)

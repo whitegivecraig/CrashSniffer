@@ -15,6 +15,12 @@ public static class CrashAggregator
     /// <summary>取关联事件时前后各扩展多少分钟</summary>
     private const int RELATED_WINDOW_MINUTES = 5;
 
+    /// <summary>单组聚合窗口的硬上限：防止高频事件把窗口链式延长到无边界，整批事件串成一个巨型组</summary>
+    private static readonly TimeSpan MERGE_WINDOW_HARD_CAP = TimeSpan.FromHours(2);
+
+    /// <summary>合并 EventMessage 的长度上限，超出后停止追加（防 O(n²) 字符串膨胀）</summary>
+    private const int MAX_MERGED_MESSAGE_LENGTH = 8000;
+
     /// <summary>
     /// 采集并归并，返回按时间倒序的崩溃事件列表
     /// </summary>
@@ -50,15 +56,18 @@ public static class CrashAggregator
             CrashEvent primary = all[i];
             DateTime windowStart = primary.Time;
             DateTime windowEnd = primary.Time.AddMinutes(MERGE_WINDOW_MINUTES);
+            // 硬上限：窗口最多从首个事件延展 2 小时，防止链式延长把全部事件并成一组
+            DateTime windowHardCap = windowStart.Add(MERGE_WINDOW_HARD_CAP);
 
             var group = new List<CrashEvent> { primary };
             i++;
             while (i < all.Count && all[i].Time <= windowEnd)
             {
                 group.Add(all[i]);
-                // 延展窗口尾 (BSOD+1001+41 可能跨越几十秒)
-                if (all[i].Time.AddMinutes(MERGE_WINDOW_MINUTES) > windowEnd)
-                    windowEnd = all[i].Time.AddMinutes(MERGE_WINDOW_MINUTES);
+                // 延展窗口尾 (BSOD+1001+41 可能跨越几十秒)，但不超过硬上限
+                DateTime candidate = all[i].Time.AddMinutes(MERGE_WINDOW_MINUTES);
+                if (candidate > windowEnd)
+                    windowEnd = candidate > windowHardCap ? windowHardCap : candidate;
                 i++;
             }
 
@@ -208,9 +217,13 @@ public static class CrashAggregator
                 leader.EventMessage = other.EventMessage;
 
             // 如果 leader 时间比 other 早，把 other 事件消息里的内容串到 EventMessage 后
-            if (!string.IsNullOrEmpty(other.EventMessage) && !leader.EventMessage.Contains(other.EventMessage))
+            // 超过长度上限后停止追加，防止高频事件把合并消息膨胀到 MB 级
+            if (leader.EventMessage.Length < MAX_MERGED_MESSAGE_LENGTH
+                && !string.IsNullOrEmpty(other.EventMessage) && !leader.EventMessage.Contains(other.EventMessage))
             {
-                leader.EventMessage += $" [{other.Type}: {other.Summary}] {other.EventMessage}";
+                string append = $" [{other.Type}: {other.Summary}] {other.EventMessage}";
+                if (leader.EventMessage.Length + append.Length <= MAX_MERGED_MESSAGE_LENGTH)
+                    leader.EventMessage += append;
             }
         }
 

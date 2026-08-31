@@ -13,6 +13,9 @@ namespace CrashSniffer.Collectors;
 /// </summary>
 public static class EventLogCollector
 {
+    /// <summary>单次扫描最多收录的事件数，防止"全部"范围下高频 WHEA 纠正错误撑爆内存</summary>
+    private const int MAX_COLLECT_EVENTS = 5000;
+
     /// <summary>
     /// 收集指定时间范围内的事件，并返回转换后的 CrashEvent 列表
     /// </summary>
@@ -33,18 +36,22 @@ public static class EventLogCollector
             EventRecord? record;
             while ((record = reader.ReadEvent()) != null)
             {
-                try
+                using (record)
                 {
-                    if (record.TimeCreated == null) continue;
-                    DateTime t = record.TimeCreated.Value;
-                    if (t < startTime || t > endTime) continue; // 双保险
+                    if (result.Count >= MAX_COLLECT_EVENTS) break;
+                    try
+                    {
+                        if (record.TimeCreated == null) continue;
+                        DateTime t = record.TimeCreated.Value;
+                        if (t < startTime || t > endTime) continue; // 双保险
 
-                    var ev = ConvertEvent(record, t);
-                    if (ev != null) result.Add(ev);
-                }
-                catch (Exception ex)
-                {
-                    System.Diagnostics.Debug.WriteLine($"事件转换失败: {ex.Message}");
+                        var ev = ConvertEvent(record, t);
+                        if (ev != null) result.Add(ev);
+                    }
+                    catch (Exception ex)
+                    {
+                        System.Diagnostics.Debug.WriteLine($"事件转换失败: {ex.Message}");
+                    }
                 }
             }
         }
@@ -88,23 +95,26 @@ public static class EventLogCollector
             int count = 0;
             while ((rec = reader.ReadEvent()) != null && count < 200)
             {
-                try
+                using (rec)
                 {
-                    if (rec.TimeCreated == null) continue;
-                    var lv = rec.LevelDisplayName ?? "Information";
-                    string msg = SafeGetMessage(rec);
-                    list.Add(new RelatedEvent
+                    try
                     {
-                        Time = rec.TimeCreated.Value,
-                        Provider = rec.ProviderName ?? "?",
-                        EventId = rec.Id,
-                        Level = lv,
-                        Message = Truncate(msg, 800),
-                        RawXml = Truncate(rec.ToXml(), 4000),
-                    });
-                    count++;
+                        if (rec.TimeCreated == null) continue;
+                        var lv = rec.LevelDisplayName ?? "Information";
+                        string msg = SafeGetMessage(rec);
+                        list.Add(new RelatedEvent
+                        {
+                            Time = rec.TimeCreated.Value,
+                            Provider = rec.ProviderName ?? "?",
+                            EventId = rec.Id,
+                            Level = lv,
+                            Message = Truncate(msg, 800),
+                            RawXml = Truncate(rec.ToXml(), 4000),
+                        });
+                        count++;
+                    }
+                    catch { /* skip */ }
                 }
-                catch { /* skip */ }
             }
         }
         catch { /* skip */ }
@@ -127,13 +137,16 @@ public static class EventLogCollector
         }
 
         // 目标 Event ID / Provider 组合
+        // WHEA 过滤到 Warning 及以上：Information 级的"已纠正"硬件错误在超频不稳机器上
+        // 每分钟可产生数十条，全量收录会撑爆内存且对排障无额外价值
+        const string wheaLevel = "(Level=1 or Level=2 or Level=3)";
         var filters = new List<string>
         {
             $"*[System[Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41 and {timePred}]]",
             $"*[System[Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] and EventID=1001 and {timePred}]]",
             $"*[System[Provider[@Name='EventLog'] and EventID=6008 and {timePred}]]",
-            $"*[System[Provider[@Name='WHEA-Logger'] and {timePred}]]",
-            $"*[System[Provider[@Name='Microsoft-Windows-WHEA-Logger'] and {timePred}]]",
+            $"*[System[Provider[@Name='WHEA-Logger'] and {wheaLevel} and {timePred}]]",
+            $"*[System[Provider[@Name='Microsoft-Windows-WHEA-Logger'] and {wheaLevel} and {timePred}]]",
             $"*[System[Provider[@Name='Display'] and (EventID=4101 or EventID=4102 or EventID=4103 or EventID=4104 or EventID=4105) and {timePred}]]",
             $"*[System[Provider[@Name='Microsoft-Windows-Display'] and (EventID=4101 or EventID=4102 or EventID=4103) and {timePred}]]",
             $"*[System[Provider[@Name='nvlddmkm'] and {timePred}]]",
