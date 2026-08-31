@@ -18,6 +18,7 @@
 - 嫌疑驱动排行（"惯犯名单"），并附系统内实际驱动版本
 - WHEA 事件细化解析：直接给出出错部位结论（CPU / PCIe 设备 / 内存）
 - 崩溃前后 ±5 分钟关联事件一览，方便还原现场
+- 环境变更检测：每次扫描自动记录硬件/驱动快照，BIOS 刷新、驱动升级、Windows 更新、XMP 开关等变更一目了然，崩溃详情自动关联「事发前变更」
 
 ### 历史趋势
 - 最近 30 天每日崩溃次数柱状图
@@ -69,6 +70,11 @@ dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-con
 本项目基于 .NET 8 运行时，使用 System.Text.Json、System.Diagnostics.EventLog、System.Management（均为 MIT 许可），详见 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)。
 
 ## 📝 更新日志
+
+### v2.1.0
+- **新增**：环境变更检测 —— 每次扫描持久化环境快照，自动检测两次扫描之间的 BIOS / Windows 更新 / 显卡驱动 / 内存频率（XMP）/ 芯片组驱动 / 硬件清单变更
+- **新增**：崩溃详情「事发前变更」卡片（自动关联崩溃前变更，附相对时间）与独立「环境变更」时间线页签
+- **新增**：报告包新增 environment_history.json，HTML 报告附事发前变更与完整变更时间线
 
 ### v2.0.1
 - **修复**：点击「全部」时间范围时崩溃（`DateTimePicker` 越界异常），现在正确使用控件自身的日期边界

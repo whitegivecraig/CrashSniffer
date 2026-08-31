@@ -74,10 +74,26 @@ https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 
 -----------------------------------------------------------------------
+5. xunit / Microsoft.NET.Test.Sdk / xunit.runner.visualstudio
+-----------------------------------------------------------------------
+
+组件名称：xunit 2.7.0、xunit.runner.visualstudio 2.5.7（Apache License 2.0）
+          Microsoft.NET.Test.Sdk 17.9.0（MIT License）
+用途说明：仅用于本仓库源码的单元测试（CrashSniffer.Tests 工程引用），
+          不随 CrashSniffer.exe 发行包分发，不参与最终二进制产物。
+来源：https://www.nuget.org/packages/xunit/
+      https://www.nuget.org/packages/xunit.runner.visualstudio/
+      https://www.nuget.org/packages/Microsoft.NET.Test.Sdk/
+
+Apache License 2.0 摘要：允许商用、修改与分发，需保留版权、许可与声明，
+并注明修改。完整许可文本见 https://www.apache.org/licenses/LICENSE-2.0
+Microsoft.NET.Test.Sdk 为 MIT License，许可文本同上（MIT License）。
+
+-----------------------------------------------------------------------
 说明
 -----------------------------------------------------------------------
 
-以上四个组件均为 MIT 许可协议。MIT 许可允许在闭源/商业产品中使用、修改
+以上组件中，随发行包分发的均为 MIT 许可协议（xunit 测试组件为 Apache License 2.0，仅用于源码测试，不参与分发）。MIT 许可允许在闭源/商业产品中使用、修改
 和再分发上述组件，唯一条件是在分发时保留原始版权与许可声明，即本文件
 所包含的内容。
 
