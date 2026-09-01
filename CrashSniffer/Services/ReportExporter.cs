@@ -20,6 +20,9 @@ public static class ReportExporter
     /// <summary>单个 dump 超过这个大小则不打包进 zip (500MB)</summary>
     private const long MAX_DUMP_COPY_SIZE = 500L * 1024 * 1024;
 
+    /// <summary>单个 .evtx 日志文件导出体积上限（50MB，防 System channel 过大撑爆报告包）</summary>
+    private const long MAX_EVTX_SIZE = 50L * 1024 * 1024;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = true,
@@ -93,6 +96,63 @@ public static class ReportExporter
                     {
                         result.SkippedDumps.Add($"{ev.DumpPath}（复制失败: {ex.Message}）");
                     }
+                }
+
+                // 2.5 event_logs 目录：用 wevtutil 按时间窗导出 System channel 为标准 .evtx
+                // 失败/超限不阻断主流程（与 dump 导出同样原则）
+                try
+                {
+                    string logsDir = Path.Combine(tempDir, "event_logs");
+                    Directory.CreateDirectory(logsDir);
+                    string evtxPath = Path.Combine(logsDir, "System.evtx");
+
+                    // wevtutil 要求 UTC ISO 8601 时间
+                    string startUtc = startTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                    string endUtc = endTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+                    string xpath = $"*[System[TimeCreated[@SystemTime>='{startUtc}' and @SystemTime<='{endUtc}']]]";
+
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "wevtutil.exe",
+                        Arguments = $"epl System \"{evtxPath}\" /q:\"{xpath}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardError = true,
+                    };
+                    using var p = System.Diagnostics.Process.Start(psi);
+                    if (p != null)
+                    {
+                        string stderr = p.StandardError.ReadToEnd();
+                        if (!p.WaitForExit(30000)) // 30s 超时
+                        { try { p.Kill(); } catch { } }
+
+                        if (p.ExitCode == 0 && File.Exists(evtxPath))
+                        {
+                            var fi = new FileInfo(evtxPath);
+                            if (fi.Length == 0)
+                            {
+                                // 时间窗内 System channel 无事件，删除空文件
+                                try { File.Delete(evtxPath); } catch { }
+                            }
+                            else if (fi.Length > MAX_EVTX_SIZE)
+                            {
+                                result.SkippedDumps.Add($"System.evtx（{fi.Length / 1024 / 1024} MB，超过 {MAX_EVTX_SIZE / 1024 / 1024} MB 上限，建议手动用事件查看器导出）");
+                                try { File.Delete(evtxPath); } catch { }
+                            }
+                            else
+                            {
+                                result.FilesIncluded.Add($"event_logs/System.evtx");
+                            }
+                        }
+                        else if (p.ExitCode != 0)
+                        {
+                            result.SkippedDumps.Add($"System.evtx（wevtutil 失败: {stderr.Trim()})");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    result.SkippedDumps.Add($"System.evtx（导出异常: {ex.Message}）");
                 }
 
                 // 3. report.html
@@ -273,10 +333,10 @@ public static class ReportExporter
             sb.AppendLine("</article>");
         }
 
-        // 跳过的 dump
+        // 跳过的 dump / 事件日志
         if (progress.SkippedDumps.Count > 0)
         {
-            sb.AppendLine("<section class=\"note warn\"><h3>⚠ 未包含在 zip 中的 dump 文件</h3><ul>");
+            sb.AppendLine("<section class=\"note warn\"><h3>⚠ 未包含在 zip 中的源文件（dump / 事件日志）</h3><ul>");
             foreach (var s in progress.SkippedDumps)
                 sb.AppendLine($"<li>{Escape(s)}</li>");
             sb.AppendLine("</ul></section>");
