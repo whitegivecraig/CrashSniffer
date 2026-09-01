@@ -37,7 +37,9 @@
 ### 运行要求
 - Windows 10 / 11（x64）
 - **管理员权限**（读取 MEMORY.DMP 与系统事件日志必需，程序会自动请求 UAC 提权）
-- Release 附带的 zip 为框架依赖式发布，需安装 [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0)；从源码自行构建需要 .NET 8 SDK
+
+### 下载安装
+从 [Releases](https://github.com/whitegivecraig/CrashSniffer/releases) 下载最新版 `CrashSniffer_v*_win-x64.zip`，解压后直接运行 `CrashSniffer.exe`。发布为自包含单文件，**无需安装 .NET 运行时**。
 
 ### 使用方法
 1. 以管理员身份运行 `CrashSniffer.exe`
@@ -53,6 +55,8 @@ git clone https://github.com/whitegivecraig/CrashSniffer.git
 cd CrashSniffer
 dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-contained
 ```
+
+> 发布产物不入库，二进制统一通过 GitHub Releases 分发。
 
 ## 📊 崩溃事件类型
 
@@ -70,6 +74,15 @@ dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-con
 本项目基于 .NET 8 运行时，使用 System.Text.Json、System.Diagnostics.EventLog、System.Management（均为 MIT 许可），详见 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)。
 
 ## 📝 更新日志
+
+### v2.1.1
+- **修复**：wevtutil 挂起导致导出报告时 UI 永久假死（超时强杀 + 导出移至后台线程）
+- **修复**：扫描期间切换日期范围可并发触发两次扫描、历史存档互相覆盖的问题（重入保护 + 存档加锁）
+- **修复**：Event 41 缺失 PowerButtonTimestamp 字段时被误标"可能按下电源键"，误导断电排障方向
+- **修复**：报告包内不同目录同名 dump 互相覆盖，现在自动重命名并注明来源
+- **修复**：存档原子写入残留 Delete+Move 窗口，进程被杀可能丢文件；LiveKernelReports 单目录无权限导致整体采集失败；minidump 边界数据丢失整条 BugCheck 信息
+- **改进**：6008 关机时间按多日期格式精确解析；导出 dumps 加 2GB 总量预算防撑爆系统盘；事件 XML 单次解析 + 关联事件查询共享会话，大批量扫描明显提速
+- **发布**：二进制改为 GitHub Releases 分发，仓库仅保留源码
 
 ### v2.1.0
 - **新增**：环境变更检测 —— 每次扫描持久化环境快照，自动检测两次扫描之间的 BIOS / Windows 更新 / 显卡驱动 / 内存频率（XMP）/ 芯片组驱动 / 硬件清单变更

@@ -2,6 +2,12 @@
 bin/
 obj/
 
+# Publish output (二进制走 GitHub Releases 分发，不入库)
+publish/
+
+# Release packages
+/*.zip
+
 # Visual Studio
 .vs/
 *.user
