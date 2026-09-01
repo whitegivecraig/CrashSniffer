@@ -458,7 +458,7 @@ public class MainForm : Form
             for (int i = 0; i < show; i++)
             {
                 var c = before[i];
-                AppendLine(ch, $"{RelativeBefore(ev.Time, c.Time)} · {EnvironmentHistoryTab.CategoryLabel(c.Category)}",
+                AppendLine(ch, $"{EnvironmentChangeDetector.RelativeBefore(ev.Time, c.Time)} · {EnvironmentChangeDetector.CategoryLabel(c.Category)}",
                     Color.FromArgb(0x1e, 0x3a, 0x8a), bold: true);
                 AppendLine(ch, $"  {c.Item}:  {c.OldValue}  →  {c.NewValue}", Color.FromArgb(0x1f, 0x29, 0x37));
             }
@@ -549,15 +549,6 @@ public class MainForm : Form
     {
         var key = (template.FontFamily.Name, size, bold);
         return _fontCache.GetOrAdd(key, k => new Font(k.family, k.size, bold ? FontStyle.Bold : FontStyle.Regular));
-    }
-
-    /// <summary>变更时间相对崩溃时间的表述，如 "崩溃前 3 天"</summary>
-    private static string RelativeBefore(DateTime crash, DateTime change)
-    {
-        var span = crash - change;
-        if (span <= TimeSpan.Zero) return "崩溃同时";
-        if (span.TotalDays >= 1) return $"崩溃前 {(int)span.TotalDays} 天";
-        return $"崩溃前 {Math.Max(1, (int)span.TotalHours)} 小时";
     }
 
     private void SetBusy(bool busy, string statusText)

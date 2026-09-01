@@ -72,23 +72,10 @@ public class EnvironmentHistoryTab : UserControl
             int i = _grid.Rows.Add();
             var row = _grid.Rows[i];
             row.Cells[0].Value = c.Time;
-            row.Cells[1].Value = CategoryLabel(c.Category);
+            row.Cells[1].Value = EnvironmentChangeDetector.CategoryLabel(c.Category);
             row.Cells[2].Value = c.Item;
             row.Cells[3].Value = c.OldValue;
             row.Cells[4].Value = c.NewValue;
         }
     }
-
-    /// <summary>变更类别的中文显示名（详情页复用）</summary>
-    internal static string CategoryLabel(ChangeCategory c) => c switch
-    {
-        ChangeCategory.Bios => "BIOS",
-        ChangeCategory.WindowsUpdate => "Windows 更新",
-        ChangeCategory.GpuDriver => "显卡驱动",
-        ChangeCategory.MemorySpeed => "内存频率",
-        ChangeCategory.PlatformDriver => "芯片组驱动",
-        ChangeCategory.Hardware => "硬件变更",
-        ChangeCategory.MemoryDiag => "内存诊断",
-        _ => c.ToString(),
-    };
 }

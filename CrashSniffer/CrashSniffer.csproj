@@ -14,6 +14,15 @@
     <Authors>CrashSniffer</Authors>
     <Product>Windows 系统崩溃信息抓取工具</Product>
     <Description>崩溃重启后快速采集 BSOD/WHEA/TDR/LiveKernel/事件日志并生成报告</Description>
+
+    <!-- 体积优化：单文件打包 + 原生库内嵌 + 压缩 + 砍全球化 -->
+    <!-- 风险评估：CultureInfo 仅用 InvariantCulture（安全）；无程序集动态加载（安全） -->
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
   </PropertyGroup>
 
   <ItemGroup>

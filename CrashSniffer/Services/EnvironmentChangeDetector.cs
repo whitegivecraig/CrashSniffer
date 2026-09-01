@@ -194,4 +194,26 @@ public static class EnvironmentChangeDetector
                 { Category = ChangeCategory.Hardware, Item = "新增内存条", OldValue = "-", NewValue = added };
         }
     }
+
+    /// <summary>变更类别的中文显示名（UI 详情页 / 报告导出复用）</summary>
+    public static string CategoryLabel(ChangeCategory c) => c switch
+    {
+        ChangeCategory.Bios => "BIOS",
+        ChangeCategory.WindowsUpdate => "Windows 更新",
+        ChangeCategory.GpuDriver => "显卡驱动",
+        ChangeCategory.MemorySpeed => "内存频率",
+        ChangeCategory.PlatformDriver => "芯片组驱动",
+        ChangeCategory.Hardware => "硬件变更",
+        ChangeCategory.MemoryDiag => "内存诊断",
+        _ => c.ToString(),
+    };
+
+    /// <summary>变更时间相对崩溃时间的表述，如 "崩溃前 3 天"（UI 详情页 / 报告导出复用）</summary>
+    public static string RelativeBefore(DateTime crash, DateTime change)
+    {
+        var span = crash - change;
+        if (span <= TimeSpan.Zero) return "崩溃同时";
+        if (span.TotalDays >= 1) return $"崩溃前 {(int)span.TotalDays} 天";
+        return $"崩溃前 {Math.Max(1, (int)span.TotalHours)} 小时";
+    }
 }

@@ -234,7 +234,7 @@ public static class ReportExporter
                     for (int k = 0; k < show; k++)
                     {
                         var c = before[k];
-                        sb.AppendLine($"<div class=\"row\"><span class=\"k\">{Escape(RelativeBefore(ev.Time, c.Time))}</span><span class=\"v\">{Escape(c.Item)}（{CategoryName(c.Category)}）：<span class=\"mono\">{Escape(c.OldValue)}</span> → <span class=\"mono warn\">{Escape(c.NewValue)}</span></span></div>");
+                        sb.AppendLine($"<div class=\"row\"><span class=\"k\">{Escape(EnvironmentChangeDetector.RelativeBefore(ev.Time, c.Time))}</span><span class=\"v\">{Escape(c.Item)}（{EnvironmentChangeDetector.CategoryLabel(c.Category)}）：<span class=\"mono\">{Escape(c.OldValue)}</span> → <span class=\"mono warn\">{Escape(c.NewValue)}</span></span></div>");
                     }
                     if (before.Count > show)
                         sb.AppendLine($"<p class=\"meta\" style=\"margin:8px 0 0\">另有 {before.Count - show} 条更早变更，见文末「环境变更时间线」。</p>");
@@ -290,7 +290,7 @@ public static class ReportExporter
                 sb.AppendLine("<section class=\"stat\"><h3 style=\"margin:0 0 10px;color:var(--accent)\">🕐 环境变更时间线</h3>");
                 sb.AppendLine("<table class=\"rel-tbl\"><thead><tr><th>检测时间</th><th>类别</th><th>项目</th><th>旧值</th><th>新值</th></tr></thead><tbody>");
                 foreach (var c in envHistory.Changes.OrderByDescending(c => c.Time))
-                    sb.AppendLine($"<tr><td>{c.Time:yyyy-MM-dd HH:mm}</td><td>{CategoryName(c.Category)}</td><td>{Escape(c.Item)}</td><td class=\"mono\">{Escape(c.OldValue)}</td><td class=\"mono warn\">{Escape(c.NewValue)}</td></tr>");
+                    sb.AppendLine($"<tr><td>{c.Time:yyyy-MM-dd HH:mm}</td><td>{EnvironmentChangeDetector.CategoryLabel(c.Category)}</td><td>{Escape(c.Item)}</td><td class=\"mono\">{Escape(c.OldValue)}</td><td class=\"mono warn\">{Escape(c.NewValue)}</td></tr>");
                 sb.AppendLine("</tbody></table>");
                 sb.AppendLine($"<p class=\"meta\" style=\"margin:8px 0 0\">共 {envHistory.Changes.Count} 条变更 · {envHistory.Snapshots.Count} 份环境快照</p>");
                 sb.AppendLine("</section>");
@@ -355,26 +355,6 @@ public static class ReportExporter
         CrashType.LiveKernel => "🧩 LiveKernel 挂死 (未蓝屏)",
         _ => t.ToString(),
     };
-
-    private static string CategoryName(ChangeCategory c) => c switch
-    {
-        ChangeCategory.Bios => "BIOS",
-        ChangeCategory.WindowsUpdate => "Windows 更新",
-        ChangeCategory.GpuDriver => "显卡驱动",
-        ChangeCategory.MemorySpeed => "内存频率",
-        ChangeCategory.PlatformDriver => "芯片组驱动",
-        ChangeCategory.Hardware => "硬件变更",
-        ChangeCategory.MemoryDiag => "内存诊断",
-        _ => c.ToString(),
-    };
-
-    private static string RelativeBefore(DateTime crash, DateTime change)
-    {
-        var span = crash - change;
-        if (span <= TimeSpan.Zero) return "崩溃同时";
-        if (span.TotalDays >= 1) return $"崩溃前 {(int)span.TotalDays} 天";
-        return $"崩溃前 {Math.Max(1, (int)span.TotalHours)} 小时";
-    }
 
     private static string Escape(string s)
     {
