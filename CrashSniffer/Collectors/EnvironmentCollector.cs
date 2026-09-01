@@ -40,10 +40,14 @@ public static class EnvironmentCollector
         try
         {
             using var searcher = new ManagementObjectSearcher("SELECT Name FROM Win32_Processor");
-            foreach (var o in searcher.Get())
+            using var items = searcher.Get();
+            foreach (var o in items)
             {
-                snap.CpuName = (o["Name"] as string)?.Trim() ?? string.Empty;
-                break;
+                using (o)
+                {
+                    snap.CpuName = (o["Name"] as string)?.Trim() ?? string.Empty;
+                    break;
+                }
             }
         }
         catch (Exception ex) { snap.CollectErrors.Add($"CPU 信息采集失败: {ex.Message}"); }
@@ -54,15 +58,19 @@ public static class EnvironmentCollector
         try
         {
             using var searcher = new ManagementObjectSearcher("SELECT SMBIOSBIOSVersion, ReleaseDate FROM Win32_BIOS");
-            foreach (var o in searcher.Get())
+            using var items = searcher.Get();
+            foreach (var o in items)
             {
-                snap.BiosVersion = (o["SMBIOSBIOSVersion"] as string)?.Trim() ?? string.Empty;
-                if (o["ReleaseDate"] is string dmtf && DateTime.TryParseExact(
-                        dmtf.Substring(0, 14), "yyyyMMddHHmmss",
-                        System.Globalization.CultureInfo.InvariantCulture,
-                        System.Globalization.DateTimeStyles.None, out var dt))
-                    snap.BiosDate = dt.ToString("yyyy-MM-dd");
-                break;
+                using (o)
+                {
+                    snap.BiosVersion = (o["SMBIOSBIOSVersion"] as string)?.Trim() ?? string.Empty;
+                    if (o["ReleaseDate"] is string dmtf && DateTime.TryParseExact(
+                            dmtf.Substring(0, 14), "yyyyMMddHHmmss",
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            System.Globalization.DateTimeStyles.None, out var dt))
+                        snap.BiosDate = dt.ToString("yyyy-MM-dd");
+                    break;
+                }
             }
         }
         catch (Exception ex) { snap.CollectErrors.Add($"BIOS 信息采集失败: {ex.Message}"); }
@@ -73,12 +81,16 @@ public static class EnvironmentCollector
         try
         {
             using var searcher = new ManagementObjectSearcher("SELECT Manufacturer, Product FROM Win32_BaseBoard");
-            foreach (var o in searcher.Get())
+            using var items = searcher.Get();
+            foreach (var o in items)
             {
-                string maker = (o["Manufacturer"] as string)?.Trim() ?? "";
-                string product = (o["Product"] as string)?.Trim() ?? "";
-                snap.Motherboard = $"{maker} {product}".Trim();
-                break;
+                using (o)
+                {
+                    string maker = (o["Manufacturer"] as string)?.Trim() ?? "";
+                    string product = (o["Product"] as string)?.Trim() ?? "";
+                    snap.Motherboard = $"{maker} {product}".Trim();
+                    break;
+                }
             }
         }
         catch (Exception ex) { snap.CollectErrors.Add($"主板信息采集失败: {ex.Message}"); }
@@ -90,22 +102,26 @@ public static class EnvironmentCollector
         {
             using var searcher = new ManagementObjectSearcher(
                 "SELECT Name, DriverVersion, DriverDate, AdapterRAM FROM Win32_VideoController");
-            foreach (var o in searcher.Get())
+            using var items = searcher.Get();
+            foreach (var o in items)
             {
-                var gpu = new GpuInfo
+                using (o)
                 {
-                    Name = (o["Name"] as string)?.Trim() ?? "",
-                    DriverVersion = (o["DriverVersion"] as string)?.Trim() ?? "",
-                };
-                if (o["DriverDate"] is string dmtf && DateTime.TryParseExact(
-                        dmtf.Substring(0, 14), "yyyyMMddHHmmss",
-                        System.Globalization.CultureInfo.InvariantCulture,
-                        System.Globalization.DateTimeStyles.None, out var dt))
-                    gpu.DriverDate = dt.ToString("yyyy-MM-dd");
-                if (o["AdapterRAM"] is uint ram)
-                    gpu.AdapterRamMb = ram / (1024 * 1024); // WMI uint32 上限 4GB，超过的显示 4095
-                if (!string.IsNullOrEmpty(gpu.Name))
-                    snap.Gpus.Add(gpu);
+                    var gpu = new GpuInfo
+                    {
+                        Name = (o["Name"] as string)?.Trim() ?? "",
+                        DriverVersion = (o["DriverVersion"] as string)?.Trim() ?? "",
+                    };
+                    if (o["DriverDate"] is string dmtf && DateTime.TryParseExact(
+                            dmtf.Substring(0, 14), "yyyyMMddHHmmss",
+                            System.Globalization.CultureInfo.InvariantCulture,
+                            System.Globalization.DateTimeStyles.None, out var dt))
+                        gpu.DriverDate = dt.ToString("yyyy-MM-dd");
+                    if (o["AdapterRAM"] is uint ram)
+                        gpu.AdapterRamMb = ram / (1024 * 1024); // WMI uint32 上限 4GB，超过的显示 4095
+                    if (!string.IsNullOrEmpty(gpu.Name))
+                        snap.Gpus.Add(gpu);
+                }
             }
         }
         catch (Exception ex) { snap.CollectErrors.Add($"显卡信息采集失败: {ex.Message}"); }
@@ -118,18 +134,22 @@ public static class EnvironmentCollector
             using var searcher = new ManagementObjectSearcher(
                 "SELECT BankLabel, Capacity, Speed, ConfiguredClockSpeed, Manufacturer, PartNumber FROM Win32_PhysicalMemory");
             double totalGb = 0;
-            foreach (var o in searcher.Get())
+            using var items = searcher.Get();
+            foreach (var o in items)
             {
-                var stick = new MemoryStickInfo
+                using (o)
                 {
-                    Slot = (o["BankLabel"] as string)?.Trim() ?? "",
-                    Manufacturer = (o["Manufacturer"] as string)?.Trim() ?? "",
-                    PartNumber = (o["PartNumber"] as string)?.Trim() ?? "",
-                };
-                if (o["Capacity"] is ulong cap) { stick.CapacityGb = Math.Round(cap / (1024.0 * 1024 * 1024), 0); totalGb += stick.CapacityGb; }
-                stick.Speed = ToUint(o["Speed"]);
-                stick.ConfiguredSpeed = ToUint(o["ConfiguredClockSpeed"]);
-                snap.MemorySticks.Add(stick);
+                    var stick = new MemoryStickInfo
+                    {
+                        Slot = (o["BankLabel"] as string)?.Trim() ?? "",
+                        Manufacturer = (o["Manufacturer"] as string)?.Trim() ?? "",
+                        PartNumber = (o["PartNumber"] as string)?.Trim() ?? "",
+                    };
+                    if (o["Capacity"] is ulong cap) { stick.CapacityGb = Math.Round(cap / (1024.0 * 1024 * 1024), 0); totalGb += stick.CapacityGb; }
+                    stick.Speed = ToUint(o["Speed"]);
+                    stick.ConfiguredSpeed = ToUint(o["ConfiguredClockSpeed"]);
+                    snap.MemorySticks.Add(stick);
+                }
             }
 
             if (snap.MemorySticks.Count > 0)
