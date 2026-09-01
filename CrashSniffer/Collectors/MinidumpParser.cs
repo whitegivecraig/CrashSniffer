@@ -356,24 +356,27 @@ public static class MinidumpParser
 
     private static BugCheckInfo ReadBugCheckInfo(BinaryReader br, uint rva, uint size)
     {
+        // 边界校验：rva 越界时返回空结果，而不是让 EndOfStreamException
+        // 在上游被吞掉导致整条 BugCheck 信息全部丢失
+        if (rva >= (ulong)br.BaseStream.Length) return new BugCheckInfo();
         br.BaseStream.Position = rva;
-        if (br.BaseStream.Position + 4 + 32 + 4 + 0x200 > br.BaseStream.Length)
-            size = (uint)(br.BaseStream.Length - br.BaseStream.Position);
+        long available = br.BaseStream.Length - rva;
 
-        uint code = br.ReadUInt32();
-        ulong p1 = br.ReadUInt64();
-        ulong p2 = br.ReadUInt64();
-        ulong p3 = br.ReadUInt64();
-        ulong p4 = br.ReadUInt64();
+        // MINIDUMP_BUGCHECK_DATA: Code(4) + Param1..4(各 8) + DriverRva(4) + ReasonRva(4)
+        // 字段级边界检查：数据不足时读到哪算哪，保留已读出的部分
+        uint code = 0;
+        ulong p1 = 0, p2 = 0, p3 = 0, p4 = 0;
+        if (available >= 4) code = br.ReadUInt32();
+        if (available >= 12) p1 = br.ReadUInt64();
+        if (available >= 20) p2 = br.ReadUInt64();
+        if (available >= 28) p3 = br.ReadUInt64();
+        if (available >= 36) p4 = br.ReadUInt64();
 
         string driverName = string.Empty;
         try
         {
-            // 接下来通常是：ULONG32 BugCheckDriverRva + ULONG32 Reserved[3]
-            // 但实际上 MINIDUMP_BUGCHECK_DATA 结构是：
-            // BugCheckCode (4) + BugCheckParam1..4 (各 8 = 32) + BugCheckDriverRva (4) + BugCheckReasonRva (4) + ...
-            // 保险起见读 4 bytes Rva 尝试解字符串
-            if (size >= 4 + 32 + 8)
+            // 驱动名 Rva 区域：流内实际可读字节数也要够，否则跳过
+            if (size >= 4 + 32 + 8 && available >= 4 + 32 + 8)
             {
                 uint driverRva = br.ReadUInt32();
                 uint reasonRva = br.ReadUInt32();

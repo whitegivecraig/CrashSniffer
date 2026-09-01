@@ -10,7 +10,7 @@
     <AssemblyName>CrashSniffer</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
-    <Version>2.1.0</Version>
+    <Version>2.1.1</Version>
     <Authors>CrashSniffer</Authors>
     <Product>Windows 系统崩溃信息抓取工具</Product>
     <Description>崩溃重启后快速采集 BSOD/WHEA/TDR/LiveKernel/事件日志并生成报告</Description>

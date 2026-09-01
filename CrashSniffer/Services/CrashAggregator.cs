@@ -1,3 +1,4 @@
+using System.Diagnostics.Eventing.Reader;
 using CrashSniffer.Collectors;
 using CrashSniffer.Models;
 
@@ -87,14 +88,26 @@ public static class CrashAggregator
         // 附关联事件（±5分钟 System 日志）
         if (includeRelated)
         {
-            foreach (var ev in merged)
+            // 共用一个 EventLogSession：N 个事件原先要建 N 次会话，
+            // 开销主要在连接事件日志服务；会话建不起来时回退到 GetRelatedEvents 自建
+            EventLogSession? session = null;
+            try { session = new EventLogSession(); }
+            catch { /* 无权限等场景：留空，走每次自建回退 */ }
+            try
             {
-                try
+                foreach (var ev in merged)
                 {
-                    ev.RelatedEvents.AddRange(
-                        EventLogCollector.GetRelatedEvents(ev.Time, RELATED_WINDOW_MINUTES));
+                    try
+                    {
+                        ev.RelatedEvents.AddRange(
+                            EventLogCollector.GetRelatedEvents(ev.Time, RELATED_WINDOW_MINUTES, session));
+                    }
+                    catch { /* 忽略 */ }
                 }
-                catch { /* 忽略 */ }
+            }
+            finally
+            {
+                session?.Dispose();
             }
         }
 

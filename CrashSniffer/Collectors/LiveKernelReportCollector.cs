@@ -10,6 +10,9 @@ namespace CrashSniffer.Collectors;
 /// </summary>
 public static class LiveKernelReportCollector
 {
+    /// <summary>单次扫描最多收录的 dump 文件数（与事件采集上限同级的防护）</summary>
+    private const int MAX_COLLECT_FILES = 500;
+
     /// <summary>
     /// 收集指定时间范围内（按文件修改时间）的 LiveKernelReport dump
     /// </summary>
@@ -23,8 +26,16 @@ public static class LiveKernelReportCollector
 
         try
         {
-            foreach (var file in Directory.EnumerateFiles(root, "*.dmp", SearchOption.AllDirectories))
+            // IgnoreInaccessible：某个子目录访问被拒时跳过该目录继续枚举，
+            // 而不是让整个枚举抛异常导致已收集的部分也一并丢弃
+            var opts = new EnumerationOptions
             {
+                RecurseSubdirectories = true,
+                IgnoreInaccessible = true,
+            };
+            foreach (var file in Directory.EnumerateFiles(root, "*.dmp", opts))
+            {
+                if (result.Count >= MAX_COLLECT_FILES) break;
                 try
                 {
                     var fi = new FileInfo(file);

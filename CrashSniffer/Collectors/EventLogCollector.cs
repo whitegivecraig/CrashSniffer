@@ -73,16 +73,24 @@ public static class EventLogCollector
     }
 
     /// <summary>
-    /// 额外方法：扫描指定时间窗口内全部 System 日志 (用于"关联事件"附在崩溃事件旁)
+    /// 额外方法：扫描指定时间窗口内全部 System 日志 (用于"关联事件"附在崩溃事件旁)。
+    /// 可传入 sharedSession 复用同一个 EventLogSession（多个事件批量查询时避免重复建立会话），
+    /// 传入的 session 由调用方负责释放
     /// </summary>
-    public static List<RelatedEvent> GetRelatedEvents(DateTime center, int minutesWindow = 5)
+    public static List<RelatedEvent> GetRelatedEvents(DateTime center, int minutesWindow = 5, EventLogSession? sharedSession = null)
     {
         DateTime start = center.AddMinutes(-minutesWindow);
         DateTime end = center.AddMinutes(minutesWindow);
         var list = new List<RelatedEvent>();
+        EventLogSession? session = sharedSession;
+        bool ownsSession = false;
         try
         {
-            using var session = new EventLogSession();
+            if (session == null)
+            {
+                session = new EventLogSession();
+                ownsSession = true;
+            }
             string xpath = BuildXPath(start, end, allProvider: true);
             var query = new EventLogQuery("System", PathType.LogName, xpath)
             {
@@ -118,6 +126,10 @@ public static class EventLogCollector
             }
         }
         catch { /* skip */ }
+        finally
+        {
+            if (ownsSession) session?.Dispose();
+        }
         return list.OrderBy(e => e.Time).ToList();
     }
 
@@ -165,16 +177,18 @@ public static class EventLogCollector
         int id = rec.Id;
         string xml = SafeGetXml(rec);
         string message = SafeGetMessage(rec);
+        // XML 只解析一次，后续字段提取复用（原先每个字段都重新 Parse 整个 XML，单条事件重复 ~10 次）
+        XDocument? doc = ParseXml(xml);
 
         // BugCheck 1001：停止代码在事件参数里
         if (id == 1001 && provider.Contains("SystemErrorReporting"))
-            return FromBugCheckEvent(t, xml, message, rec);
+            return FromBugCheckEvent(t, doc, message);
 
         // EventLog 6008："前一次系统关机在 XX 时间是意外的"
         if (id == 6008 && provider.Equals("EventLog", StringComparison.OrdinalIgnoreCase))
         {
             // 6008 事件参数里有"关机发生的实际时间"，优先用这个
-            DateTime actual = ParseShutdownEvent6008(t, xml) ?? t;
+            DateTime actual = ParseShutdownEvent6008(t, doc) ?? t;
             return new CrashEvent
             {
                 Time = actual,
@@ -192,8 +206,11 @@ public static class EventLogCollector
         // Kernel-Power 41：重启时记录，BugCheckCode 有时在 EventData 里
         if (id == 41 && provider.Contains("Kernel-Power"))
         {
-            uint bugCheck = TryGetUintFromXml(xml, "BugcheckCode");
-            string powerReason = TryGetStringFromXml(xml, "PowerButtonTimestamp") != "0"
+            uint bugCheck = TryGetUint(doc, "BugcheckCode");
+            // PowerButtonTimestamp 字段缺失时 TryGetString 返回 null：
+            // 只有取到非空且非 0 才视为按了电源键，否则会把真正的断电/蓝屏误标成手动按键
+            string? powerBtn = TryGetString(doc, "PowerButtonTimestamp");
+            string powerReason = !string.IsNullOrEmpty(powerBtn) && powerBtn != "0"
                 ? " (可能按下了电源键/睡眠键)" : string.Empty;
 
             var ev = new CrashEvent
@@ -227,13 +244,13 @@ public static class EventLogCollector
 
         // WHEA-Logger (旧 Provider 名 WHEA-Logger，新名 Microsoft-Windows-WHEA-Logger)
         if (provider.Contains("WHEA-Logger", StringComparison.OrdinalIgnoreCase))
-            return FromWheaEvent(t, id, xml, message, rec);
+            return FromWheaEvent(t, id, xml, doc, message);
 
         // Display TDR (4101 最常见)
         if ((provider.Equals("Display", StringComparison.OrdinalIgnoreCase)
              || provider.Contains("Microsoft-Windows-Display"))
             && (id is 4101 or 4102 or 4103 or 4104 or 4105))
-            return FromTdrEvent(t, id, xml, message, provider);
+            return FromTdrEvent(t, id, doc, message, provider);
 
         // 显卡驱动直接发的事件 (nvlddmkm / amdkmdag)
         if (provider.Equals("nvlddmkm", StringComparison.OrdinalIgnoreCase) ||
@@ -260,9 +277,9 @@ public static class EventLogCollector
         return null;
     }
 
-    private static CrashEvent FromBugCheckEvent(DateTime t, string xml, string message, EventRecord rec)
+    private static CrashEvent FromBugCheckEvent(DateTime t, XDocument? doc, string message)
     {
-        uint code = TryGetHexUintFromXml(xml, "param1") ?? TryGetUintFromXml(xml, "param1");
+        uint code = TryGetHexUint(doc, "param1") ?? TryGetUint(doc, "param1");
         var ev = new CrashEvent
         {
             Time = t,
@@ -271,10 +288,10 @@ public static class EventLogCollector
             BugCheckCode = code,
             BugCheckParams =
             [
-                TryGetHexUlongFromXml(xml, "param2") ?? TryGetUlongFromXml(xml, "param2"),
-                TryGetHexUlongFromXml(xml, "param3") ?? TryGetUlongFromXml(xml, "param3"),
-                TryGetHexUlongFromXml(xml, "param4") ?? TryGetUlongFromXml(xml, "param4"),
-                TryGetHexUlongFromXml(xml, "param5") ?? TryGetUlongFromXml(xml, "param5"),
+                TryGetHexUlong(doc, "param2") ?? TryGetUlong(doc, "param2"),
+                TryGetHexUlong(doc, "param3") ?? TryGetUlong(doc, "param3"),
+                TryGetHexUlong(doc, "param4") ?? TryGetUlong(doc, "param4"),
+                TryGetHexUlong(doc, "param5") ?? TryGetUlong(doc, "param5"),
             ],
         };
         var info = BugCheckKnowledge.Get(code);
@@ -283,7 +300,7 @@ public static class EventLogCollector
         ev.Troubleshooting.AddRange(info.Suggestions);
 
         // 一般 param6/7 有 dump 文件名
-        string dumpName = TryGetStringFromXml(xml, "param6") ?? TryGetStringFromXml(xml, "param7");
+        string? dumpName = TryGetString(doc, "param6") ?? TryGetString(doc, "param7");
         if (!string.IsNullOrWhiteSpace(dumpName) && dumpName.EndsWith(".dmp", StringComparison.OrdinalIgnoreCase))
         {
             ev.DumpPath = Path.IsPathRooted(dumpName) ? dumpName :
@@ -294,15 +311,15 @@ public static class EventLogCollector
         return ev;
     }
 
-    private static CrashEvent FromWheaEvent(DateTime t, int id, string xml, string message, EventRecord rec)
+    private static CrashEvent FromWheaEvent(DateTime t, int id, string xml, XDocument? doc, string message)
     {
-        string errorType = TryGetStringFromXml(xml, "ErrorType") ?? TryGetStringFromXml(xml, "Type") ?? "未知";
-        string? apicId = TryGetStringFromXml(xml, "ApicId") ?? TryGetStringFromXml(xml, "ProcessorApicId");
-        string? procBank = TryGetStringFromXml(xml, "CacheLevel") ?? TryGetStringFromXml(xml, "ErrorSourceId");
-        string? pcieRequester = TryGetStringFromXml(xml, "RequesterId") ?? TryGetStringFromXml(xml, "DeviceName");
+        string errorType = TryGetString(doc, "ErrorType") ?? TryGetString(doc, "Type") ?? "未知";
+        string? apicId = TryGetString(doc, "ApicId") ?? TryGetString(doc, "ProcessorApicId");
+        string? procBank = TryGetString(doc, "CacheLevel") ?? TryGetString(doc, "ErrorSourceId");
+        string? pcieRequester = TryGetString(doc, "RequesterId") ?? TryGetString(doc, "DeviceName");
 
         // WHEA 错误类型解码：ErrorType 值=0~10
-        string? wheaTypeText = DecodeWheaType(TryGetUintFromXml(xml, "ErrorType"));
+        string? wheaTypeText = DecodeWheaType(TryGetUint(doc, "ErrorType"));
 
         var ev = new CrashEvent
         {
@@ -334,11 +351,11 @@ public static class EventLogCollector
         return ev;
     }
 
-    private static CrashEvent FromTdrEvent(DateTime t, int id, string xml, string message, string provider)
+    private static CrashEvent FromTdrEvent(DateTime t, int id, XDocument? doc, string message, string provider)
     {
-        string driverName = TryGetStringFromXml(xml, "DriverName") ?? TryGetStringFromXml(xml, "param1");
+        string? driverName = TryGetString(doc, "DriverName") ?? TryGetString(doc, "param1");
         // Event 4101 描述形如：N/A 显示驱动程序 amdkmdag.sys 版本 ... 已停止响应并已成功恢复。
-        string detected = driverName;
+        string detected = driverName ?? string.Empty;
         if (string.IsNullOrWhiteSpace(detected))
         {
             if (message.Contains("amdkmdag", StringComparison.OrdinalIgnoreCase)) detected = "amdkmdag.sys";
@@ -477,17 +494,17 @@ public static class EventLogCollector
         catch { return string.Empty; }
     }
 
-    private static string? TryGetStringFromXml(string xml, string key)
+    private static string? TryGetString(XDocument? doc, string key)
     {
+        if (doc == null) return null;
         try
         {
-            var xdoc = XDocument.Parse(xml);
             XNamespace ns = "http://schemas.microsoft.com/win/2004/08/events/event";
-            var dataEl = xdoc.Descendants(ns + "EventData").Elements(ns + "Data")
+            var dataEl = doc.Descendants(ns + "EventData").Elements(ns + "Data")
                 .FirstOrDefault(e => e.Attribute("Name")?.Value == key);
             if (dataEl != null) return dataEl.Value;
             // 无 Name 属性的 param 模式：第几个
-            var list = xdoc.Descendants(ns + "EventData").Elements(ns + "Data").ToList();
+            var list = doc.Descendants(ns + "EventData").Elements(ns + "Data").ToList();
             int idx = int.TryParse(key.Replace("param", ""), out int p) ? p - 1 : -1;
             if (idx >= 0 && idx < list.Count) return list[idx].Value;
             return null;
@@ -495,51 +512,71 @@ public static class EventLogCollector
         catch { return null; }
     }
 
-    private static uint TryGetUintFromXml(string xml, string key)
+    private static XDocument? ParseXml(string xml)
     {
-        string? s = TryGetStringFromXml(xml, key);
+        if (string.IsNullOrEmpty(xml)) return null;
+        try { return XDocument.Parse(xml); }
+        catch { return null; }
+    }
+
+    private static uint TryGetUint(XDocument? doc, string key)
+    {
+        string? s = TryGetString(doc, key);
         if (string.IsNullOrWhiteSpace(s)) return 0;
         if (uint.TryParse(s, out uint v)) return v;
         return 0;
     }
 
-    private static ulong TryGetUlongFromXml(string xml, string key)
+    private static ulong TryGetUlong(XDocument? doc, string key)
     {
-        string? s = TryGetStringFromXml(xml, key);
+        string? s = TryGetString(doc, key);
         if (string.IsNullOrWhiteSpace(s)) return 0;
         if (ulong.TryParse(s, out ulong v)) return v;
         return 0;
     }
 
-    private static uint? TryGetHexUintFromXml(string xml, string key)
+    private static uint? TryGetHexUint(XDocument? doc, string key)
     {
-        string? s = TryGetStringFromXml(xml, key);
+        string? s = TryGetString(doc, key);
         if (string.IsNullOrWhiteSpace(s)) return null;
         s = s.Replace("0x", "").Replace("0X", "").Trim();
         if (uint.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out uint v)) return v;
         return null;
     }
 
-    private static ulong? TryGetHexUlongFromXml(string xml, string key)
+    private static ulong? TryGetHexUlong(XDocument? doc, string key)
     {
-        string? s = TryGetStringFromXml(xml, key);
+        string? s = TryGetString(doc, key);
         if (string.IsNullOrWhiteSpace(s)) return null;
         s = s.Replace("0x", "").Replace("0X", "").Trim();
         if (ulong.TryParse(s, System.Globalization.NumberStyles.HexNumber, null, out ulong v)) return v;
         return null;
     }
 
-    private static DateTime? ParseShutdownEvent6008(DateTime defaultTime, string xml)
+    private static DateTime? ParseShutdownEvent6008(DateTime defaultTime, XDocument? doc)
     {
-        // 6008 EventData param1=小时:分:秒, param2=日/月/年
+        // 6008 EventData param1=小时:分:秒, param2=日期
         try
         {
-            string? t = TryGetStringFromXml(xml, "param1");
-            string? d = TryGetStringFromXml(xml, "param2");
+            string? t = TryGetString(doc, "param1");
+            string? d = TryGetString(doc, "param2");
             if (string.IsNullOrWhiteSpace(t) || string.IsNullOrWhiteSpace(d)) return defaultTime;
-            if (DateTime.TryParse($"{d} {t}", out var actual))
+
+            string combined = $"{d} {t}";
+            // 日期格式随系统区域设置变化（zh-CN 常见 yyyy/M/d，en-US 为 M/d/yyyy），
+            // 项目开了 InvariantGlobalization，当前文化解析不可靠，改用显式格式列表
+            string[] formats =
+            {
+                "yyyy/M/d H:mm:ss", "M/d/yyyy H:mm:ss", "d/M/yyyy H:mm:ss",
+                "yyyy-M-d H:mm:ss", "d-M-yyyy H:mm:ss", "M-d-yyyy H:mm:ss",
+            };
+            if (DateTime.TryParseExact(combined, formats,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var actual))
                 return actual;
-            if (DateTime.TryParse($"{d.Replace('/', '-')} {t}", out var actual2))
+            // 兜底：宽松解析（仍限定 Invariant，避免受区域影响）
+            if (DateTime.TryParse(combined, System.Globalization.CultureInfo.InvariantCulture,
+                    System.Globalization.DateTimeStyles.None, out var actual2))
                 return actual2;
             return defaultTime;
         }

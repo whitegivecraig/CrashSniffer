@@ -31,10 +31,16 @@ public class HistoryRecord
 /// </summary>
 public static class HistoryStore
 {
+    /// <summary>历史记录保留上限（超出淘汰最旧，防存档无限增长——参照 EnvironmentHistoryStore 模式）</summary>
+    private const int MaxRecords = 5000;
+
     public static string StorageDir { get; } = Path.Combine(
         Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "CrashSniffer");
 
     public static string FilePath { get; } = Path.Combine(StorageDir, "history.json");
+
+    /// <summary>存档 IO 锁：后台任务并发 AppendAndSave（Load→改→Save）时避免互相覆盖丢更新</summary>
+    private static readonly object IoLock = new();
 
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
@@ -79,27 +85,31 @@ public static class HistoryStore
     {
         try
         {
-            var existing = Load();
-            var fingerprints = existing.Select(Fingerprint).ToHashSet();
-
-            int added = 0;
-            foreach (var ev in events)
+            lock (IoLock)
             {
-                var rec = ToRecord(ev);
-                string fp = Fingerprint(rec);
-                if (fingerprints.Contains(fp)) continue;
+                var existing = Load();
+                var fingerprints = existing.Select(Fingerprint).ToHashSet();
 
-                fingerprints.Add(fp);
-                existing.Add(rec);
-                added++;
-            }
+                int added = 0;
+                foreach (var ev in events)
+                {
+                    var rec = ToRecord(ev);
+                    string fp = Fingerprint(rec);
+                    if (fingerprints.Contains(fp)) continue;
 
-            if (added > 0)
-            {
-                var ordered = existing.OrderByDescending(r => r.Time).ToList();
-                Save(ordered);
+                    fingerprints.Add(fp);
+                    existing.Add(rec);
+                    added++;
+                }
+
+                if (added > 0)
+                {
+                    // 上限淘汰：保留最近的 MaxRecords 条，防长期高频崩溃机器的存档无限增长
+                    var ordered = existing.OrderByDescending(r => r.Time).Take(MaxRecords).ToList();
+                    Save(ordered);
+                }
+                return added;
             }
-            return added;
         }
         catch
         {
@@ -113,11 +123,11 @@ public static class HistoryStore
         Directory.CreateDirectory(StorageDir);
         string json = JsonSerializer.Serialize(records, JsonOpts);
 
-        // 原子写入：先写临时文件再替换，避免写一半被杀进程留下损坏文件
+        // 原子写入：先写临时文件再覆盖替换（overwrite 的 Move 内部走 MOVEFILE_REPLACE_EXISTING），
+        // 消除原来 Delete 与 Move 之间进程被杀导致正式文件丢失的窗口
         string tmp = FilePath + ".tmp";
         File.WriteAllText(tmp, json, Encoding.UTF8);
-        if (File.Exists(FilePath)) File.Delete(FilePath);
-        File.Move(tmp, FilePath);
+        File.Move(tmp, FilePath, overwrite: true);
     }
 
     private static HistoryRecord ToRecord(CrashEvent ev) => new()

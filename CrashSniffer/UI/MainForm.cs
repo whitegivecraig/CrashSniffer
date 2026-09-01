@@ -70,6 +70,8 @@ public class MainForm : Form
     private List<EnvironmentChange> _envChanges = new();
     /// <summary>SetQuickRange 期间抑制 DateTimePicker 的 ValueChanged 触发重复扫描</summary>
     private bool _suppressRangeEvents;
+    /// <summary>扫描重入保护：true 表示一次扫描正在进行中</summary>
+    private bool _scanning;
     private readonly Color _bsodColor = Color.FromArgb(0x1d, 0x4e, 0xd9);
     private readonly Color _wheaColor = Color.FromArgb(0xc2, 0x41, 0x0c);
     private readonly Color _tdrColor = Color.FromArgb(0x6d, 0x28, 0xd9);
@@ -258,20 +260,24 @@ public class MainForm : Form
 
     private async void RefreshScan()
     {
-        DateTime start = _dtpStart.Value;
-        DateTime end = _dtpEnd.Value;
-        if (start > end)
-        {
-            MessageBox.Show(this, "开始时间不能晚于结束时间。", "时间范围错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return;
-        }
-
-        SetBusy(true, "正在扫描 minidump、系统事件日志和 LiveKernelReports…");
-        _btnExport.Enabled = false;
-        _envSnapshot = null;
-
+        // 重入保护：上一次扫描未完成时（日期变更、按钮连点）直接忽略，
+        // 避免并发扫描互相覆盖结果、后台存档写入互相踩踏
+        if (_scanning) return;
+        _scanning = true;
         try
         {
+            DateTime start = _dtpStart.Value;
+            DateTime end = _dtpEnd.Value;
+            if (start > end)
+            {
+                MessageBox.Show(this, "开始时间不能晚于结束时间。", "时间范围错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            SetBusy(true, "正在扫描 minidump、系统事件日志和 LiveKernelReports…");
+            _btnExport.Enabled = false;
+            _envSnapshot = null;
+
             var task = Task.Run(() => CrashAggregator.CollectAndAggregate(start, end));
             await task;
 
@@ -285,6 +291,8 @@ public class MainForm : Form
             SetBusy(false, $"扫描完成，共 {_events.Count} 条崩溃事件 (Minidump {_dumpCount} / 事件 {_logCount} / LiveKernel {_liveCount})");
 
             // 后台：写入历史存档 + 采集环境快照（均不阻塞 UI）
+            // 注意：这两个是 fire-and-forget 任务，可能比本次扫描活得久，
+            // 存档类的并发安全由各 Store 内部的 IO 锁保证
             _ = Task.Run(() =>
             {
                 try { HistoryStore.AppendAndSave(_events); } catch { /* 历史失败不影响主流程 */ }
@@ -312,7 +320,13 @@ public class MainForm : Form
         catch (Exception ex)
         {
             SetBusy(false, "扫描失败");
-            MessageBox.Show(this, $"扫描过程出错：\n{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            // Task.WaitAll 会把采集层抛出的具体异常（如"需要管理员权限"）包成 AggregateException，
+            // 取根因异常展示，避免用户只看到 "One or more errors occurred."
+            MessageBox.Show(this, $"扫描过程出错：\n{ex.GetBaseException().Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _scanning = false;
         }
     }
 
@@ -353,7 +367,6 @@ public class MainForm : Form
         // BSOD / Stop code
         var b = _tbBsod;
         b.Clear();
-        b.Font = new Font("Consolas", 10);
         AppendLine(b, $"■ 时间        {ev.Time:yyyy-MM-dd HH:mm:ss}", ColorForType(ev.Type), bold: true);
         AppendLine(b, $"■ 类型        {TypeLabel(ev.Type)}", Color.Black);
         AppendLine(b, $"■ 摘要        {ev.Summary}", Color.FromArgb(0x1f, 0x29, 0x37));
@@ -513,7 +526,14 @@ public class MainForm : Form
 
             EnvironmentHistoryData envHistory;
             try { envHistory = EnvironmentHistoryStore.Load(); } catch { envHistory = new EnvironmentHistoryData(); }
-            var result = ReportExporter.Export(dlg.FileName, _events, _dtpStart.Value, _dtpEnd.Value, env, ranking, envHistory);
+
+            // 导出包含大 dump 复制与 zip 压缩，放后台线程执行，避免冻结 UI；
+            // UI 相关值（时间范围、事件列表引用）先在 UI 线程取好再传入
+            DateTime rangeStart = _dtpStart.Value;
+            DateTime rangeEnd = _dtpEnd.Value;
+            var eventsSnapshot = _events;
+            var result = await Task.Run(() =>
+                ReportExporter.Export(dlg.FileName, eventsSnapshot, rangeStart, rangeEnd, env, ranking, envHistory));
             SetBusy(false, result.Success ? $"报告包导出成功：{dlg.FileName}" : $"导出失败：{result.ErrorMessage}");
 
             if (!result.Success)
@@ -555,9 +575,11 @@ public class MainForm : Form
     {
         _btnRefresh.Enabled = !busy;
         _btnExport.Enabled = !busy && _events.Count > 0;
+        // 扫描/导出期间一并禁用时间范围控件：中途改日期会触发 ValueChanged 造成扫描请求堆积
+        _dtpStart.Enabled = !busy;
+        _dtpEnd.Enabled = !busy;
         foreach (ToolStripItem it in _topToolStrip.Items)
-            if (it is ToolStripButton) it.Enabled = busy ? false : true;
-        _btnRefresh.Enabled = !busy;
+            if (it is ToolStripButton) it.Enabled = !busy;
         _lblStatus.Text = statusText;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
@@ -609,20 +631,34 @@ public class MainForm : Form
         return s.Substring(0, max) + "…";
     }
 
+    [System.Runtime.InteropServices.DllImport("user32.dll", SetLastError = true)]
+    private static extern bool DestroyIcon(IntPtr hIcon);
+
     private static Icon? IconFromFont()
     {
         try
         {
             using var bmp = new Bitmap(64, 64);
             using (var g = Graphics.FromImage(bmp))
+            using (var brush = new SolidBrush(Color.FromArgb(0x1d, 0x4e, 0xd9)))
+            using (var font = new Font("Segoe UI Emoji", 28))
+            using (var sf = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
             {
                 g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
-                g.FillEllipse(new SolidBrush(Color.FromArgb(0x1d, 0x4e, 0xd9)), 0, 0, 64, 64);
-                g.DrawString("🪦", new Font("Segoe UI Emoji", 28), Brushes.White, new RectangleF(0, 6, 64, 52),
-                    new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center });
+                g.FillEllipse(brush, 0, 0, 64, 64);
+                g.DrawString("🪦", font, Brushes.White, new RectangleF(0, 6, 64, 52), sf);
             }
             IntPtr h = bmp.GetHicon();
-            return Icon.FromHandle(h);
+            try
+            {
+                // Icon.FromHandle 不接管句柄所有权：Clone 出独立副本后销毁原 HICON
+                using var wrapper = Icon.FromHandle(h);
+                return (Icon)wrapper.Clone();
+            }
+            finally
+            {
+                _ = DestroyIcon(h);
+            }
         }
         catch
         {

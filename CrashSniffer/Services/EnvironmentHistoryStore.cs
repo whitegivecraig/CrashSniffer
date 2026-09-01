@@ -39,6 +39,9 @@ public static class EnvironmentHistoryStore
     /// <summary>测试用路径覆盖（避免测试写 %ProgramData%）</summary>
     internal static string? FilePathOverrideForTests { get; set; }
 
+    /// <summary>存档 IO 锁：后台快照任务并发 RecordSnapshot（Load→改→Save）时避免互相覆盖丢更新</summary>
+    private static readonly object IoLock = new();
+
     private static string ActualFilePath => FilePathOverrideForTests ?? FilePath;
 
     private static readonly JsonSerializerOptions JsonOpts = new()
@@ -93,41 +96,44 @@ public static class EnvironmentHistoryStore
     {
         try
         {
-            var data = Load();
-            string fp = EnvironmentChangeDetector.FingerprintOf(snap);
-
-            var last = data.Snapshots.OrderByDescending(s => s.CollectedAt).FirstOrDefault();
-            if (last != null && last.Fingerprint == fp)
-                return 0; // 环境未变，不重复入库
-
-            int added = 0;
-            if (last != null)
+            lock (IoLock)
             {
-                foreach (var c in EnvironmentChangeDetector.Detect(last.Snapshot, snap))
+                var data = Load();
+                string fp = EnvironmentChangeDetector.FingerprintOf(snap);
+
+                var last = data.Snapshots.OrderByDescending(s => s.CollectedAt).FirstOrDefault();
+                if (last != null && last.Fingerprint == fp)
+                    return 0; // 环境未变，不重复入库
+
+                int added = 0;
+                if (last != null)
                 {
-                    c.Time = snap.CollectedAt;
-                    data.Changes.Add(c);
-                    added++;
+                    foreach (var c in EnvironmentChangeDetector.Detect(last.Snapshot, snap))
+                    {
+                        c.Time = snap.CollectedAt;
+                        data.Changes.Add(c);
+                        added++;
+                    }
                 }
+
+                data.Snapshots.Add(new SnapshotRecord
+                {
+                    CollectedAt = snap.CollectedAt,
+                    Fingerprint = fp,
+                    Snapshot = snap,
+                });
+
+                // 上限淘汰
+                if (data.Snapshots.Count > MaxSnapshots)
+                    data.Snapshots = data.Snapshots
+                        .OrderByDescending(s => s.CollectedAt).Take(MaxSnapshots).ToList();
+                if (data.Changes.Count > MaxChanges)
+                    data.Changes = data.Changes
+                        .OrderByDescending(c => c.Time).Take(MaxChanges).ToList();
+
+                Save(data);
+                return added;
             }
-
-            data.Snapshots.Add(new SnapshotRecord
-            {
-                CollectedAt = snap.CollectedAt,
-                Fingerprint = fp,
-                Snapshot = snap,
-            });
-
-            // 上限淘汰
-            if (data.Snapshots.Count > MaxSnapshots)
-                data.Snapshots = data.Snapshots
-                    .OrderByDescending(s => s.CollectedAt).Take(MaxSnapshots).ToList();
-            if (data.Changes.Count > MaxChanges)
-                data.Changes = data.Changes
-                    .OrderByDescending(c => c.Time).Take(MaxChanges).ToList();
-
-            Save(data);
-            return added;
         }
         catch
         {
@@ -136,14 +142,15 @@ public static class EnvironmentHistoryStore
         }
     }
 
-    /// <summary>原子写入：先写临时文件再替换，避免写一半留下损坏文件</summary>
+    /// <summary>原子写入：先写临时文件再覆盖替换，避免写一半留下损坏文件</summary>
     private static void Save(EnvironmentHistoryData data)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(ActualFilePath)!);
         string json = JsonSerializer.Serialize(data, JsonOpts);
+        // overwrite 的 Move 内部走 MOVEFILE_REPLACE_EXISTING，消除 Delete 与 Move
+        // 之间进程被杀导致正式文件丢失的窗口
         string tmp = ActualFilePath + ".tmp";
         File.WriteAllText(tmp, json, Encoding.UTF8);
-        if (File.Exists(ActualFilePath)) File.Delete(ActualFilePath);
-        File.Move(tmp, ActualFilePath);
+        File.Move(tmp, ActualFilePath, overwrite: true);
     }
 }

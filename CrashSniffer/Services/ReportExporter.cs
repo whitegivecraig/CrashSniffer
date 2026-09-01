@@ -23,6 +23,9 @@ public static class ReportExporter
     /// <summary>单个 .evtx 日志文件导出体积上限（50MB，防 System channel 过大撑爆报告包）</summary>
     private const long MAX_EVTX_SIZE = 50L * 1024 * 1024;
 
+    /// <summary>dumps 目录总体积预算（2GB）：事件多且各带大 dump 时防止把 %TEMP%（通常在 C 盘）塞满</summary>
+    private const long MAX_TOTAL_DUMP_SIZE = 2L * 1024 * 1024 * 1024;
+
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         WriteIndented = true,
@@ -71,6 +74,10 @@ public static class ReportExporter
                 string dumpsDir = Path.Combine(tempDir, "dumps");
                 Directory.CreateDirectory(dumpsDir);
                 var copiedDumps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                // 已占用的目标文件名：Minidump\ 与 LiveKernelReports\各子目录下可能存在同名 dump，
+                // 直接 FileMode.Create 会静默覆盖，冲突时追加序号区分
+                var usedDestNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                long totalDumpBytes = 0;
                 foreach (var ev in events)
                 {
                     if (string.IsNullOrWhiteSpace(ev.DumpPath)) continue;
@@ -83,14 +90,29 @@ public static class ReportExporter
                         result.SkippedDumps.Add($"{ev.DumpPath}（{fi.Length / 1024 / 1024} MB，超过 500MB，建议手动用 WinDbg 打开）");
                         continue;
                     }
+                    if (totalDumpBytes + fi.Length > MAX_TOTAL_DUMP_SIZE)
+                    {
+                        result.SkippedDumps.Add($"{ev.DumpPath}（dumps 总体积已达 {totalDumpBytes / 1024 / 1024} MB 上限，超出 2GB 预算，未包含）");
+                        continue;
+                    }
                     try
                     {
-                        string dest = Path.Combine(dumpsDir, Path.GetFileName(ev.DumpPath));
+                        string fileName = Path.GetFileName(ev.DumpPath);
+                        string destName = fileName;
+                        int seq = 1;
+                        while (usedDestNames.Contains(destName))
+                            destName = $"{Path.GetFileNameWithoutExtension(fileName)}_{seq++}{Path.GetExtension(fileName)}";
+                        usedDestNames.Add(destName);
+
+                        string dest = Path.Combine(dumpsDir, destName);
                         using (var src = new FileStream(ev.DumpPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                         using (var dst = new FileStream(dest, FileMode.Create, FileAccess.Write))
                             src.CopyTo(dst);
                         copiedDumps.Add(ev.DumpPath);
-                        result.FilesIncluded.Add($"dumps/{Path.GetFileName(ev.DumpPath)}");
+                        totalDumpBytes += fi.Length;
+                        result.FilesIncluded.Add(destName == fileName
+                            ? $"dumps/{fileName}"
+                            : $"dumps/{destName}（来自 {ev.DumpPath}，与已有 dump 同名已重命名）");
                     }
                     catch (Exception ex)
                     {
@@ -122,11 +144,22 @@ public static class ReportExporter
                     using var p = System.Diagnostics.Process.Start(psi);
                     if (p != null)
                     {
-                        string stderr = p.StandardError.ReadToEnd();
+                        // 先启动异步读取再等待退出：同步 ReadToEnd 在 wevtutil 挂起（无输出且不退出）时
+                        // 会永久阻塞，导致下面的超时和 Kill 永远执行不到
+                        Task<string> stderrTask = p.StandardError.ReadToEndAsync();
                         if (!p.WaitForExit(30000)) // 30s 超时
-                        { try { p.Kill(); } catch { } }
+                        {
+                            try { p.Kill(); } catch { }
+                            // Kill 是异步通知：等进程真正退出后 ExitCode 才可访问，否则抛 InvalidOperationException
+                            try { p.WaitForExit(5000); } catch { }
+                        }
 
-                        if (p.ExitCode == 0 && File.Exists(evtxPath))
+                        // 进程退出后管道关闭，读取立即完成；Wait 超时仅防御 Kill 失败的极端情况
+                        string stderr;
+                        try { stderr = stderrTask.Wait(2000) ? stderrTask.Result : string.Empty; }
+                        catch { stderr = string.Empty; }
+
+                        if (p.HasExited && p.ExitCode == 0 && File.Exists(evtxPath))
                         {
                             var fi = new FileInfo(evtxPath);
                             if (fi.Length == 0)
@@ -144,9 +177,13 @@ public static class ReportExporter
                                 result.FilesIncluded.Add($"event_logs/System.evtx");
                             }
                         }
-                        else if (p.ExitCode != 0)
+                        else if (p.HasExited && p.ExitCode != 0)
                         {
-                            result.SkippedDumps.Add($"System.evtx（wevtutil 失败: {stderr.Trim()})");
+                            result.SkippedDumps.Add($"System.evtx（wevtutil 失败: {stderr.Trim()}）");
+                        }
+                        else
+                        {
+                            result.SkippedDumps.Add("System.evtx（wevtutil 超时未退出，已强制终止）");
                         }
                     }
                 }
