@@ -68,6 +68,13 @@ public class MainForm : Form
     private EnvironmentSnapshot? _envSnapshot;
     /// <summary>环境变更记录缓存（详情页「事发前变更」关联展示用）</summary>
     private List<EnvironmentChange> _envChanges = new();
+
+    // —— 硬件健康看板 ——
+    private readonly TabPage _tabHardware = new("硬件健康") { BackColor = Color.FromArgb(248, 250, 252) };
+    private readonly HardwareHealthTab _hardwareTab = new();
+    private readonly TabPage _tabReplay = new("硬件回放") { BackColor = Color.White };
+    private readonly HardwareReplayView _replayView = new();
+    private HardwareMonitorService? _hwMonitor;
     /// <summary>SetQuickRange 期间抑制 DateTimePicker 的 ValueChanged 触发重复扫描</summary>
     private bool _suppressRangeEvents;
     /// <summary>扫描重入保护：true 表示一次扫描正在进行中</summary>
@@ -172,7 +179,8 @@ public class MainForm : Form
         _tabRelated.Controls.Add(_gridRelated);
         _tabRaw.Controls.Add(_tbRaw);
         _tabChanges.Controls.Add(_tbChanges);
-        _tabs.TabPages.AddRange(new[] { _tabBsod, _tabWhea, _tabSuggest, _tabChanges, _tabRelated, _tabRaw });
+        _tabReplay.Controls.Add(_replayView);
+        _tabs.TabPages.AddRange(new[] { _tabBsod, _tabWhea, _tabSuggest, _tabChanges, _tabReplay, _tabRelated, _tabRaw });
 
         // 关联事件列
         _gridRelated.Columns.Add(new DataGridViewTextBoxColumn { HeaderText = "时间", Width = 95, DataPropertyName = "Time", DefaultCellStyle = new DataGridViewCellStyle { Format = "HH:mm:ss.fff", Font = new Font("Consolas", 9) } });
@@ -187,7 +195,20 @@ public class MainForm : Form
         _tabEvents.Controls.Add(_split);
         _tabHistory.Controls.Add(_historyTab);
         _tabEnvHistory.Controls.Add(_envHistoryTab);
-        _rootTabs.TabPages.AddRange(new[] { _tabEvents, _tabHistory, _tabEnvHistory });
+        _tabHardware.Controls.Add(_hardwareTab);
+        _rootTabs.TabPages.AddRange(new[] { _tabEvents, _tabHistory, _tabEnvHistory, _tabHardware });
+
+        // 硬件监控服务：需管理员权限，未提权则禁用看板
+        if (AdminRightsHelper.IsRunningAsAdmin())
+        {
+            _hwMonitor = new HardwareMonitorService();
+            _hwMonitor.Start();
+            _hardwareTab.BindService(_hwMonitor);
+        }
+        else
+        {
+            _hardwareTab.Enabled = false;
+        }
 
         Controls.Add(_rootTabs);
         Controls.Add(_topToolStrip);
@@ -210,6 +231,12 @@ public class MainForm : Form
         _dtpEnd.ValueChanged += (_, _) => { if (!_suppressRangeEvents) RefreshScan(); };
 
         _grid.SelectionChanged += (_, _) => UpdateDetail();
+
+        // 退出时释放硬件监控服务（停止后台线程 + 关闭传感器）
+        FormClosing += (_, e) =>
+        {
+            try { _hwMonitor?.Dispose(); } catch { }
+        };
     }
 
     private enum TimePreset { Today, Last7Days, Last30Days, ThisMonth, All }
@@ -316,6 +343,16 @@ public class MainForm : Form
 
             // 历史趋势页同步刷新
             _historyTab.OnScanCompleted();
+
+            // 对本次扫描到的崩溃事件，记录硬件读数窗口（崩溃前5min+后1min）
+            if (_hwMonitor != null && _events.Count > 0)
+            {
+                foreach (var ev in _events)
+                {
+                    try { _hwMonitor.RecordCrashWindow(ev.Time, ev.Type.ToString()); }
+                    catch { /* 硬件回放记录失败不影响主流程 */ }
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -489,12 +526,29 @@ public class MainForm : Form
         {
             _tbRaw.AppendText(ev.EventMessage);
         }
+
+        // 硬件回放：按崩溃时间匹配快照
+        var snapshot = FindSnapshotByCrashTime(ev.Time);
+        _replayView.LoadSnapshot(snapshot);
+    }
+
+    /// <summary>按崩溃时间查找硬件快照（2 分钟容差）</summary>
+    private HardwareSnapshot? FindSnapshotByCrashTime(DateTime crashTime)
+    {
+        try
+        {
+            var snaps = HardwareSnapshotStore.ListSnapshots();
+            return snaps.FirstOrDefault(s =>
+                Math.Abs((s.CrashTime - crashTime).TotalMinutes) < 2);
+        }
+        catch { return null; }
     }
 
     private void ClearDetail()
     {
         foreach (var tb in new[] { _tbBsod, _tbWhea, _tbSuggest, _tbRaw, _tbChanges }) tb.Clear();
         _gridRelated.Rows.Clear();
+        _replayView.LoadSnapshot(null);
     }
 
     private async void DoExport()

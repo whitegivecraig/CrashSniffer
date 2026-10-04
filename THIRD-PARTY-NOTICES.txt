@@ -90,6 +90,24 @@ Apache License 2.0 摘要：允许商用、修改与分发，需保留版权、�
 Microsoft.NET.Test.Sdk 为 MIT License，许可文本同上（MIT License）。
 
 -----------------------------------------------------------------------
+6. LibreHardwareMonitor
+-----------------------------------------------------------------------
+
+组件名称：LibreHardwareMonitorLib (NuGet 包 v0.9.4)
+版权所有：Copyright (c) 2017 LibreHardwareMonitor contributors
+许可协议：Mozilla Public License 2.0 (MPL-2.0)
+用途说明：读取 CPU / GPU / 主板 / SSD 的温度、电压、风扇转速等硬件传感器数据，
+          用于"硬件健康看板"实时监控与崩溃时刻硬件读数回放功能。
+来源：https://github.com/LibreHardwareMonitor/LibreHardwareMonitor
+      https://www.nuget.org/packages/LibreHardwareMonitorLib/
+
+Mozilla Public License 2.0 摘要：允许商用、修改与分发，修改过的文件需以 MPL 2.0
+继续授权，未修改的文件可保持原许可。完整许可文本见
+https://mozilla.org/MPL/2.0/
+
+CrashSniffer 以未修改的二进制形式引用 LibreHardwareMonitorLib，不修改其源码。
+
+-----------------------------------------------------------------------
 说明
 -----------------------------------------------------------------------
 

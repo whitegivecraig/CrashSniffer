@@ -70,6 +70,24 @@ public static class ReportExporter
                     result.FilesIncluded.Add("environment_history.json");
                 }
 
+                // 1.7 hardware_snapshots/ 崩溃硬件回放快照
+                try
+                {
+                    var snaps = HardwareSnapshotStore.ListSnapshots();
+                    if (snaps.Count > 0)
+                    {
+                        string hwDir = Path.Combine(tempDir, "hardware_snapshots");
+                        Directory.CreateDirectory(hwDir);
+                        foreach (var snap in snaps)
+                        {
+                            string snapFile = Path.Combine(hwDir, $"{snap.EventId}.json");
+                            File.WriteAllText(snapFile, JsonSerializer.Serialize(snap, JsonOpts), Encoding.UTF8);
+                        }
+                        result.FilesIncluded.Add($"hardware_snapshots/ ({snaps.Count} snapshots)");
+                    }
+                }
+                catch { /* 硬件快照导出失败不阻断 */ }
+
                 // 2. dumps 目录
                 string dumpsDir = Path.Combine(tempDir, "dumps");
                 Directory.CreateDirectory(dumpsDir);
