@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -11,7 +12,7 @@ namespace CrashSniffer.Services;
 /// <summary>
 /// 硬件快照存档：每次崩溃把前后窗口的读数序列落盘为独立 JSON 文件。
 /// 存储路径：%LOCALAPPDATA%\CrashSniffer\hardware-snapshots\
-/// 最多保留 100 份，超出淘汰最旧（按 CrashTime）。
+/// 最多保留 100 份，超出淘汰最旧（按文件写入时间）。
 /// 原子写入（.tmp + File.Move），损坏自动备份，失败不阻断。
 /// </summary>
 public static class HardwareSnapshotStore
@@ -35,9 +36,31 @@ public static class HardwareSnapshotStore
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
     };
 
+    private static readonly object IoLock = new();
+
+    private const string EventIdPrefix = "crash_";
+
     /// <summary>快照文件命名：{EventId}.json</summary>
     private static string FilePathFor(string eventId)
         => Path.Combine(StorageDir, $"{SanitizeFileName(eventId)}.json");
+
+    /// <summary>生成崩溃快照的 EventId（时间精确到秒，ticks 后缀保证唯一）</summary>
+    public static string BuildEventId(DateTime crashTime)
+        => $"{EventIdPrefix}{crashTime.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture)}_{crashTime.Ticks % 1000000:D6}";
+
+    /// <summary>从 EventId 解析崩溃时间（仅适用于 BuildEventId 生成的格式）</summary>
+    public static bool TryParseCrashTime(string eventId, out DateTime crashTime)
+    {
+        crashTime = default;
+        if (!eventId.StartsWith(EventIdPrefix, StringComparison.Ordinal)) return false;
+        if (eventId.Length < EventIdPrefix.Length + 15) return false;
+        return DateTime.TryParseExact(
+            eventId.Substring(EventIdPrefix.Length, 15),
+            "yyyyMMdd_HHmmss",
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.None,
+            out crashTime);
+    }
 
     private static string SanitizeFileName(string name)
     {
@@ -51,17 +74,20 @@ public static class HardwareSnapshotStore
     {
         try
         {
-            Directory.CreateDirectory(StorageDir);
-            string path = FilePathFor(snapshot.EventId);
-            string json = JsonSerializer.Serialize(snapshot, JsonOpts);
+            lock (IoLock)
+            {
+                Directory.CreateDirectory(StorageDir);
+                string path = FilePathFor(snapshot.EventId);
+                string json = JsonSerializer.Serialize(snapshot, JsonOpts);
 
-            // 原子写入：先写 .tmp 再 Move 覆盖
-            string tmp = path + ".tmp";
-            File.WriteAllText(tmp, json, Encoding.UTF8);
-            File.Move(tmp, path, overwrite: true);
+                // 原子写入：先写 .tmp 再 Move 覆盖
+                string tmp = path + ".tmp";
+                File.WriteAllText(tmp, json, Encoding.UTF8);
+                File.Move(tmp, path, overwrite: true);
 
-            // 上限淘汰
-            EnforceLimit();
+                // 上限淘汰
+                EnforceLimit();
+            }
         }
         catch
         {
@@ -99,7 +125,21 @@ public static class HardwareSnapshotStore
         }
     }
 
-    /// <summary>列出所有快照的元数据（不含读数详情），按 CrashTime 倒序</summary>
+    /// <summary>列出全部快照 EventId（只读文件名，不解析 JSON，用于按时间快速匹配）</summary>
+    public static List<string> ListEventIds()
+    {
+        var ids = new List<string>();
+        try
+        {
+            if (!Directory.Exists(StorageDir)) return ids;
+            foreach (string file in Directory.GetFiles(StorageDir, "*.json"))
+                ids.Add(Path.GetFileNameWithoutExtension(file));
+        }
+        catch { }
+        return ids;
+    }
+
+    /// <summary>列出所有快照（含读数详情，供报告导出），按 CrashTime 倒序</summary>
     public static List<HardwareSnapshot> ListSnapshots()
     {
         var list = new List<HardwareSnapshot>();

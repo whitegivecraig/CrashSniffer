@@ -64,6 +64,31 @@ public class HardwareSnapshotStoreTests : IDisposable
     }
 
     [Fact]
+    public void BuildEventId_TryParseCrashTime_RoundtripsToSecond()
+    {
+        var t = new DateTime(2026, 9, 17, 12, 34, 56, 789);
+        string id = HardwareSnapshotStore.BuildEventId(t);
+
+        Assert.True(HardwareSnapshotStore.TryParseCrashTime(id, out var parsed));
+        Assert.Equal(new DateTime(2026, 9, 17, 12, 34, 56), parsed);
+    }
+
+    [Fact]
+    public void TryParseCrashTime_UnknownId_ReturnsFalse()
+    {
+        Assert.False(HardwareSnapshotStore.TryParseCrashTime("e1", out _));
+    }
+
+    [Fact]
+    public void ListEventIds_ReturnsSavedIds()
+    {
+        const string id = "crash_20260917_120000_000000";
+        HardwareSnapshotStore.Save(new() { EventId = id, CrashTime = DateTime.Now });
+
+        Assert.Contains(id, HardwareSnapshotStore.ListEventIds());
+    }
+
+    [Fact]
     public void Save_ExceedsLimit_RemovesOldest()
     {
         var oldLimit = HardwareSnapshotStore.MaxSnapshots;

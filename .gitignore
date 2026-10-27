@@ -15,3 +15,6 @@ publish/
 
 # Rider
 .idea/
+
+# 本地设计/头脑风暴产物
+.superpowers/

@@ -20,6 +20,11 @@
 - 崩溃前后 ±5 分钟关联事件一览，方便还原现场
 - 环境变更检测：每次扫描自动记录硬件/驱动快照，BIOS 刷新、驱动升级、Windows 更新、XMP 开关等变更一目了然，崩溃详情自动关联「事发前变更」
 
+### 硬件健康监控
+- **实时看板**：CPU / GPU / 主板电压 / SSD 温度与负载卡片，2 秒刷新，按厂商安全阈值自动配色（正常 / 警告 / 危险）
+- **崩溃回放**：环形缓冲持续保留最近 10 分钟传感器读数，崩溃时自动保存前 5 分钟 + 后 1 分钟窗口，在「硬件回放」页用曲线标注崩溃时刻
+- 需管理员权限读取传感器；未提权时看板自动降级为占位提示
+
 ### 历史趋势
 - 最近 30 天每日崩溃次数柱状图
 - 停止代码 / 嫌疑驱动分布统计
@@ -71,9 +76,16 @@ dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-con
 
 ## 📄 第三方组件
 
-本项目基于 .NET 8 运行时，使用 System.Text.Json、System.Diagnostics.EventLog、System.Management（均为 MIT 许可），详见 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)。
+本项目基于 .NET 8 运行时，使用 System.Text.Json、System.Diagnostics.EventLog、System.Management（均为 MIT 许可）与 LibreHardwareMonitorLib（MPL-2.0），详见 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)。
 
 ## 📝 更新日志
+
+### v2.2.0
+- **新增**：硬件健康看板 —— 实时监控 CPU / GPU / 主板电压 / SSD 温度与负载，2 秒刷新并按安全阈值配色
+- **新增**：崩溃硬件回放 —— 环形缓冲保留最近 10 分钟读数，崩溃时保存前 5 分钟 + 后 1 分钟窗口，曲线标注崩溃时刻
+- **新增**：报告包新增 `hardware_snapshots/` 目录，随报告一起导出崩溃时刻硬件读数
+- **改进**：仅记录监控期间发生的崩溃，快照按 EventId 去重；落盘后回放页自动刷新；快照匹配改为读取文件名，避免 UI 线程全量反序列化
+- **合规**：新增 LibreHardwareMonitorLib（MPL-2.0）第三方声明
 
 ### v2.1.1
 - **修复**：wevtutil 挂起导致导出报告时 UI 永久假死（超时强杀 + 导出移至后台线程）

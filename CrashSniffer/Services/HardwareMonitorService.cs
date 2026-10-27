@@ -29,10 +29,15 @@ public sealed class HardwareMonitorService : IDisposable
     private readonly Computer _computer;
     private readonly RingBuffer<HardwareReading> _buffer = new(BufferCapacity);
     private readonly object _sensorLock = new();
+    private readonly HashSet<string> _recordedCrashes = new();
+    private readonly object _recordLock = new();
 
     private Thread? _pollThread;
     private volatile bool _running;
     private bool _disposed;
+
+    /// <summary>快照落盘完成后触发（参数为 EventId，可能在后台线程触发）</summary>
+    public event Action<string>? SnapshotSaved;
 
     /// <summary>最新一次读数（线程安全访问）</summary>
     public HardwareReading? LatestReading
@@ -111,6 +116,8 @@ public sealed class HardwareMonitorService : IDisposable
     private HardwareReading? CollectReading()
     {
         var reading = new HardwareReading { Timestamp = DateTime.Now };
+        double cpuClockSum = 0;
+        int cpuClockCount = 0;
 
         lock (_sensorLock)
         {
@@ -128,7 +135,7 @@ public sealed class HardwareMonitorService : IDisposable
                         switch (hw.HardwareType)
                         {
                             case HardwareType.Cpu:
-                                ExtractCpu(sensor, v, reading);
+                                ExtractCpu(sensor, v, reading, ref cpuClockSum, ref cpuClockCount);
                                 break;
                             case HardwareType.GpuNvidia:
                             case HardwareType.GpuAmd:
@@ -144,6 +151,9 @@ public sealed class HardwareMonitorService : IDisposable
                                 break;
                         }
                     }
+
+                    if (hw.HardwareType == HardwareType.Cpu && cpuClockCount > 0)
+                        reading.CpuClock = cpuClockSum / cpuClockCount;
                 }
             }
             catch
@@ -154,14 +164,17 @@ public sealed class HardwareMonitorService : IDisposable
         return reading;
     }
 
-    private static void ExtractCpu(ISensor s, double v, HardwareReading r)
+    private static void ExtractCpu(ISensor s, double v, HardwareReading r, ref double clockSum, ref int clockCount)
     {
         if (s.SensorType == SensorType.Temperature && s.Name.Contains("Package"))
             r.CpuTemperature = v;
         else if (s.SensorType == SensorType.Power && s.Name.Contains("Package"))
             r.CpuPower = v;
-        else if (s.SensorType == SensorType.Clock && s.Name.Contains("Core") && r.CpuClock == null)
-            r.CpuClock = v;
+        else if (s.SensorType == SensorType.Clock && s.Name.Contains("Core"))
+        {
+            clockSum += v;
+            clockCount++;
+        }
         else if (s.SensorType == SensorType.Load && s.Name.Contains("Total"))
             r.CpuLoad = v;
     }
@@ -221,16 +234,26 @@ public sealed class HardwareMonitorService : IDisposable
     /// <summary>
     /// 崩溃事件发生时：从环形缓冲提取崩溃前 5min 的读数，
     /// 并在崩溃后继续采集 1min，然后整体落盘。
-    /// 返回快照 EventId（与崩溃事件关联）。
+    /// 仅当崩溃前已有监控数据（崩溃发生在本次监控期间）时记录；
+    /// 同一崩溃按 EventId 去重，重复扫描不会重复采集。
     /// </summary>
-    public string RecordCrashWindow(DateTime crashTime, string crashType)
+    /// <returns>是否新建了采集任务</returns>
+    public bool TryRecordCrashWindow(DateTime crashTime, string crashType)
     {
-        string eventId = $"crash_{crashTime:yyyyMMdd_HHmmss}_{crashTime.Ticks % 1000000:D6}";
+        // 未来时间（时钟异常）或崩溃前无读数（崩溃发生在本进程启动之前）时跳过
+        if (crashTime > DateTime.Now.AddMinutes(1)) return false;
 
         var before = _buffer.GetRange(
             crashTime.AddMinutes(-BeforeCrashMinutes),
             crashTime,
             r => r.Timestamp);
+        if (before.Length == 0) return false;
+
+        string eventId = HardwareSnapshotStore.BuildEventId(crashTime);
+        lock (_recordLock)
+        {
+            if (!_recordedCrashes.Add(eventId)) return false;
+        }
 
         var snapshot = new HardwareSnapshot
         {
@@ -258,11 +281,12 @@ public sealed class HardwareMonitorService : IDisposable
                     snapshot.Readings.Sort((a, b) => a.Timestamp.CompareTo(b.Timestamp));
                 }
                 HardwareSnapshotStore.Save(snapshot);
+                SnapshotSaved?.Invoke(eventId);
             }
             catch { /* 落盘失败不阻断 */ }
         });
 
-        return eventId;
+        return true;
     }
 
     public void Dispose()

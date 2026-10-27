@@ -198,16 +198,18 @@ public class MainForm : Form
         _tabHardware.Controls.Add(_hardwareTab);
         _rootTabs.TabPages.AddRange(new[] { _tabEvents, _tabHistory, _tabEnvHistory, _tabHardware });
 
-        // 硬件监控服务：需管理员权限，未提权则禁用看板
+        // 硬件监控服务：需管理员权限，未提权则禁用看板并提示
         if (AdminRightsHelper.IsRunningAsAdmin())
         {
             _hwMonitor = new HardwareMonitorService();
+            _hwMonitor.SnapshotSaved += OnHardwareSnapshotSaved;
             _hwMonitor.Start();
             _hardwareTab.BindService(_hwMonitor);
         }
         else
         {
             _hardwareTab.Enabled = false;
+            Shown += (_, _) => AdminRightsHelper.CheckAndPrompt();
         }
 
         Controls.Add(_rootTabs);
@@ -235,7 +237,9 @@ public class MainForm : Form
         // 退出时释放硬件监控服务（停止后台线程 + 关闭传感器）
         FormClosing += (_, e) =>
         {
-            try { _hwMonitor?.Dispose(); } catch { }
+            if (_hwMonitor == null) return;
+            _hwMonitor.SnapshotSaved -= OnHardwareSnapshotSaved;
+            try { _hwMonitor.Dispose(); } catch { }
         };
     }
 
@@ -344,12 +348,12 @@ public class MainForm : Form
             // 历史趋势页同步刷新
             _historyTab.OnScanCompleted();
 
-            // 对本次扫描到的崩溃事件，记录硬件读数窗口（崩溃前5min+后1min）
+            // 仅对监控期间发生的新崩溃记录读数窗口（服务内部按 EventId 去重）
             if (_hwMonitor != null && _events.Count > 0)
             {
                 foreach (var ev in _events)
                 {
-                    try { _hwMonitor.RecordCrashWindow(ev.Time, ev.Type.ToString()); }
+                    try { _hwMonitor.TryRecordCrashWindow(ev.Time, ev.Type.ToString()); }
                     catch { /* 硬件回放记录失败不影响主流程 */ }
                 }
             }
@@ -532,16 +536,39 @@ public class MainForm : Form
         _replayView.LoadSnapshot(snapshot);
     }
 
-    /// <summary>按崩溃时间查找硬件快照（2 分钟容差）</summary>
+    /// <summary>按崩溃时间查找硬件快照（2 分钟容差，取时间最接近的一份）</summary>
     private HardwareSnapshot? FindSnapshotByCrashTime(DateTime crashTime)
     {
         try
         {
-            var snaps = HardwareSnapshotStore.ListSnapshots();
-            return snaps.FirstOrDefault(s =>
-                Math.Abs((s.CrashTime - crashTime).TotalMinutes) < 2);
+            string? bestId = null;
+            double bestDelta = double.MaxValue;
+            foreach (string id in HardwareSnapshotStore.ListEventIds())
+            {
+                if (!HardwareSnapshotStore.TryParseCrashTime(id, out DateTime t)) continue;
+                double delta = Math.Abs((t - crashTime).TotalMinutes);
+                if (delta < 2 && delta < bestDelta)
+                {
+                    bestDelta = delta;
+                    bestId = id;
+                }
+            }
+            return bestId == null ? null : HardwareSnapshotStore.Load(bestId);
         }
         catch { return null; }
+    }
+
+    /// <summary>快照落盘后刷新当前选中崩溃的回放视图（后台线程回调）</summary>
+    private void OnHardwareSnapshotSaved(string eventId)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(() => RefreshReplayForSelectedCrash()); } catch { }
+    }
+
+    private void RefreshReplayForSelectedCrash()
+    {
+        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not CrashEvent ev) return;
+        _replayView.LoadSnapshot(FindSnapshotByCrashTime(ev.Time));
     }
 
     private void ClearDetail()
@@ -741,7 +768,7 @@ public class ToolStripDateTimePicker : ToolStripControlHost
     }
     public string CustomFormat
     {
-        get => Dtp.CustomFormat;
+        get => Dtp.CustomFormat ?? string.Empty;
         set => Dtp.CustomFormat = value;
     }
 }
