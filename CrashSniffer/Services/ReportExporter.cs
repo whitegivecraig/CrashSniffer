@@ -336,6 +336,16 @@ public static class ReportExporter
                 sb.AppendLine("</div>");
             }
 
+            // 崩溃前硬件分析（优先落盘快照，无则回退后台连续采样）
+            try
+            {
+                var hwSnapshot = HardwareSnapshotStore.FindByCrashTime(ev.Time)
+                                 ?? ContinuousSampleStore.BuildSnapshotForCrash(ev.Time);
+                if (hwSnapshot != null)
+                    sb.AppendLine(BuildHardwareSection(hwSnapshot));
+            }
+            catch { /* 硬件分析失败不阻断报告生成 */ }
+
             // 事发前变更
             if (envHistory is { Changes.Count: > 0 })
             {
@@ -422,6 +432,62 @@ public static class ReportExporter
     }
 
     /// <summary>
+    /// 崩溃前硬件读数分析 HTML 区块
+    /// </summary>
+    private static string BuildHardwareSection(HardwareSnapshot snapshot)
+    {
+        var pre = HardwareAnomalyAnalyzer.GetPreCrashReadings(snapshot);
+        if (pre.Count == 0) return string.Empty;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("<div class=\"card\">");
+        string sourceNote = snapshot.CrashType == "连续采样" ? "（后台连续采样）" : string.Empty;
+        sb.AppendLine($"<h3 style=\"margin:0 0 6px;color:var(--accent);font-size:15px\">🩺 崩溃前硬件分析{sourceNote}</h3>");
+
+        var parts = new List<string> { $"{pre.Count} 个采样点" };
+        var cpuTemps = pre.Where(r => r.CpuTemperature.HasValue).Select(r => r.CpuTemperature!.Value).ToList();
+        if (cpuTemps.Count > 0) parts.Add($"CPU 峰值 {cpuTemps.Max():F1}℃");
+        var gpuTemps = pre.Where(r => r.GpuTemperature.HasValue).Select(r => r.GpuTemperature!.Value).ToList();
+        if (gpuTemps.Count > 0) parts.Add($"GPU 峰值 {gpuTemps.Max():F1}℃");
+        var hotspots = pre.Where(r => r.GpuHotspot.HasValue).Select(r => r.GpuHotspot!.Value).ToList();
+        if (hotspots.Count > 0) parts.Add($"热点峰值 {hotspots.Max():F1}℃");
+        var v12 = pre.Where(r => r.Voltage12V.HasValue).Select(r => r.Voltage12V!.Value).ToList();
+        if (v12.Count > 0) parts.Add($"+12V {v12.Min():F2}–{v12.Max():F2}V");
+        sb.AppendLine($"<p class=\"meta\" style=\"margin:0 0 8px\">{string.Join(" · ", parts)}</p>");
+
+        var anomalies = HardwareAnomalyAnalyzer.Analyze(snapshot);
+        if (anomalies.Count == 0)
+        {
+            sb.AppendLine("<p class=\"ok\" style=\"margin:0\">✅ 未发现明显硬件异常</p>");
+        }
+        else
+        {
+            sb.AppendLine("<ul style=\"margin:0;padding-left:20px\">");
+            foreach (var a in anomalies)
+            {
+                string cls = a.Severity switch
+                {
+                    AnomalySeverity.Critical => "crit",
+                    AnomalySeverity.Warning => "warn",
+                    _ => "meta",
+                };
+                string icon = a.Severity switch
+                {
+                    AnomalySeverity.Critical => "⛔",
+                    AnomalySeverity.Warning => "⚠",
+                    _ => "ℹ",
+                };
+                sb.AppendLine($"<li class=\"{cls}\">{icon} <b>{Escape(a.Title)}</b>：{Escape(a.Detail)}</li>");
+            }
+            sb.AppendLine("</ul>");
+        }
+
+        sb.AppendLine("<p class=\"meta\" style=\"margin:8px 0 0\">结论基于崩溃前窗口的传感器读数，均为疑似异常，请结合散热与供电情况判断。</p>");
+        sb.AppendLine("</div>");
+        return sb.ToString();
+    }
+
+    /// <summary>
     /// 环境快照 HTML 区块
     /// </summary>
     private static string BuildEnvSection(EnvironmentSnapshot env)
@@ -503,6 +569,8 @@ header h1{margin:0 0 8px;font-size:26px;color:#f8fafc}
 .row .v{flex:1;font-size:14px;word-break:break-all}
 .mono{font-family:Consolas,'Cascadia Code',monospace;font-size:13px}
 .warn{color:var(--warn)!important;font-weight:600}
+.crit{color:#f87171!important;font-weight:600}
+.ok{color:#34d399!important;font-weight:600}
 .sug{background:rgba(56,189,248,.08);border:1px solid rgba(56,189,248,.3);border-radius:8px;padding:12px 18px;margin-top:12px}
 .sug h3{margin:0 0 6px;color:var(--accent);font-size:15px}
 .sug ol{margin:4px 0 4px 18px;padding:0}

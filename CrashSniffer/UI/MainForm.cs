@@ -536,25 +536,15 @@ public class MainForm : Form
         _replayView.LoadSnapshot(snapshot);
     }
 
-    /// <summary>按崩溃时间查找硬件快照（2 分钟容差，取时间最接近的一份）</summary>
+    /// <summary>
+    /// 按崩溃时间查找硬件快照（2 分钟容差，取时间最接近的一份）。
+    /// 没有落盘快照时回退到后台连续采样，覆盖重启后才被扫描到的崩溃。
+    /// </summary>
     private HardwareSnapshot? FindSnapshotByCrashTime(DateTime crashTime)
     {
-        try
-        {
-            string? bestId = null;
-            double bestDelta = double.MaxValue;
-            foreach (string id in HardwareSnapshotStore.ListEventIds())
-            {
-                if (!HardwareSnapshotStore.TryParseCrashTime(id, out DateTime t)) continue;
-                double delta = Math.Abs((t - crashTime).TotalMinutes);
-                if (delta < 2 && delta < bestDelta)
-                {
-                    bestDelta = delta;
-                    bestId = id;
-                }
-            }
-            return bestId == null ? null : HardwareSnapshotStore.Load(bestId);
-        }
+        var saved = HardwareSnapshotStore.FindByCrashTime(crashTime);
+        if (saved != null) return saved;
+        try { return ContinuousSampleStore.BuildSnapshotForCrash(crashTime); }
         catch { return null; }
     }
 

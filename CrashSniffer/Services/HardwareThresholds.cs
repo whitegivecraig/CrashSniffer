@@ -19,23 +19,23 @@ public enum HardwareHealth
 public static class HardwareThresholds
 {
     // CPU 温度阈值（℃）
-    private const double CpuTempWarn = 90.0;
-    private const double CpuTempCrit = 95.0;
+    internal const double CpuTempWarn = 90.0;
+    internal const double CpuTempCrit = 95.0;
 
     // GPU 温度阈值（℃）
-    private const double GpuTempWarn = 80.0;
-    private const double GpuTempCrit = 85.0;
+    internal const double GpuTempWarn = 80.0;
+    internal const double GpuTempCrit = 85.0;
 
     // SSD 温度阈值（℃）
-    private const double SsdTempWarn = 65.0;
-    private const double SsdTempCrit = 70.0;
+    internal const double SsdTempWarn = 65.0;
+    internal const double SsdTempCrit = 70.0;
 
     // 电压阈值：额定 ±5% 警告，±10% 危险
-    private const double V12Nominal = 12.0;
-    private const double V5Nominal = 5.0;
-    private const double V3Nominal = 3.3;
-    private const double VtolWarn = 0.05;   // ±5%
-    private const double VtolCrit = 0.10;   // ±10%
+    internal const double V12Nominal = 12.0;
+    internal const double V5Nominal = 5.0;
+    internal const double V3Nominal = 3.3;
+    internal const double VtolWarn = 0.05;   // ±5%
+    internal const double VtolCrit = 0.10;   // ±10%
 
     public static HardwareHealth EvaluateCpuTemp(double? temp)
         => EvaluateTemp(temp, CpuTempWarn, CpuTempCrit);

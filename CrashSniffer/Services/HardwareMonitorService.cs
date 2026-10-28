@@ -131,6 +131,8 @@ public sealed class HardwareMonitorService : IDisposable
                     {
                         if (sensor.Value == null) continue;
                         double v = sensor.Value.Value;
+                        // 驱动未就绪/传感器异常时会返回 NaN/Infinity，写入 JSON 会抛异常
+                        if (!double.IsFinite(v)) continue;
 
                         switch (hw.HardwareType)
                         {

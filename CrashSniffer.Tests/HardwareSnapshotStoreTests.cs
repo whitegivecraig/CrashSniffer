@@ -7,6 +7,7 @@ using Xunit;
 
 namespace CrashSniffer.Tests;
 
+[Collection("HardwareSnapshotStore")]
 public class HardwareSnapshotStoreTests : IDisposable
 {
     private readonly string _testDir;

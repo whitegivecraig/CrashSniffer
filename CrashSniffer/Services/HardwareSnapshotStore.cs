@@ -125,6 +125,28 @@ public static class HardwareSnapshotStore
         }
     }
 
+    /// <summary>按崩溃时间查找快照（默认 2 分钟容差，取时间最接近的一份）</summary>
+    public static HardwareSnapshot? FindByCrashTime(DateTime crashTime, double toleranceMinutes = 2)
+    {
+        try
+        {
+            string? bestId = null;
+            double bestDelta = double.MaxValue;
+            foreach (string id in ListEventIds())
+            {
+                if (!TryParseCrashTime(id, out DateTime t)) continue;
+                double delta = Math.Abs((t - crashTime).TotalMinutes);
+                if (delta < toleranceMinutes && delta < bestDelta)
+                {
+                    bestDelta = delta;
+                    bestId = id;
+                }
+            }
+            return bestId == null ? null : Load(bestId);
+        }
+        catch { return null; }
+    }
+
     /// <summary>列出全部快照 EventId（只读文件名，不解析 JSON，用于按时间快速匹配）</summary>
     public static List<string> ListEventIds()
     {

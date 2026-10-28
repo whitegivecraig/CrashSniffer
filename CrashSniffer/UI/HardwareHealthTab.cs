@@ -1,5 +1,6 @@
 using System;
 using System.Drawing;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using CrashSniffer.Models;
 using CrashSniffer.Services;
@@ -29,6 +30,25 @@ public class HardwareHealthTab : UserControl
     private readonly System.Windows.Forms.Timer _refreshTimer;
     private HardwareMonitorService? _service;
 
+    private readonly CheckBox _chkSampler = new()
+    {
+        Text = "开机后台采样（重启后仍可回放崩溃前读数）",
+        AutoSize = true,
+        Font = new Font("Microsoft YaHei UI", 9),
+        ForeColor = Color.FromArgb(0x1f, 0x29, 0x37),
+    };
+
+    private readonly Label _lblSamplerInfo = new()
+    {
+        AutoSize = true,
+        Font = new Font("Microsoft YaHei UI", 9),
+        ForeColor = Color.FromArgb(0x6b, 0x72, 0x80),
+        Margin = new Padding(16, 6, 0, 0),
+    };
+
+    private bool _samplerEnabled;
+    private bool _updatingSampler;
+
     private static readonly Color CardBack = Color.White;
     private static readonly Color CardBorder = Color.FromArgb(226, 232, 240);
     private static readonly Font TitleFont = new("Microsoft YaHei UI", 9, FontStyle.Bold);
@@ -43,13 +63,25 @@ public class HardwareHealthTab : UserControl
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 2,
+            RowCount = 3,
             Padding = new Padding(12),
         };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         root.Controls.Add(_lblStatus, 0, 0);
+
+        var samplerRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            WrapContents = false,
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        samplerRow.Controls.Add(_chkSampler);
+        samplerRow.Controls.Add(_lblSamplerInfo);
+        root.Controls.Add(samplerRow, 0, 1);
 
         var grid = new TableLayoutPanel
         {
@@ -76,12 +108,21 @@ public class HardwareHealthTab : UserControl
         grid.Controls.Add(MakeCard(_lblVoltTitle, _lblVoltValue), 0, 1);
         grid.Controls.Add(MakeCard(_lblSsdTitle, _lblSsdValue), 1, 1);
 
-        root.Controls.Add(grid, 0, 1);
+        root.Controls.Add(grid, 0, 2);
         Controls.Add(root);
 
+        _chkSampler.CheckedChanged += OnSamplerToggled;
         _refreshTimer = new System.Windows.Forms.Timer { Interval = 2000 };
-        _refreshTimer.Tick += (_, _) => RefreshReadings();
-        Load += (_, _) => _refreshTimer.Start();
+        _refreshTimer.Tick += (_, _) =>
+        {
+            RefreshReadings();
+            UpdateSamplerInfoText();
+        };
+        Load += (_, _) =>
+        {
+            _refreshTimer.Start();
+            RefreshSamplerStateAsync();
+        };
         Disposed += (_, _) => _refreshTimer.Stop();
     }
 
@@ -90,6 +131,59 @@ public class HardwareHealthTab : UserControl
     {
         _service = service;
         RefreshReadings();
+    }
+
+    /// <summary>查询计划任务注册状态并同步勾选框（schtasks 放后台线程，避免卡 UI）</summary>
+    private async void RefreshSamplerStateAsync()
+    {
+        bool enabled = await Task.Run(SamplerAutoStart.IsEnabled);
+        _samplerEnabled = enabled;
+        _updatingSampler = true;
+        _chkSampler.Checked = enabled;
+        _updatingSampler = false;
+        UpdateSamplerInfoText();
+    }
+
+    private void UpdateSamplerInfoText()
+    {
+        DateTime? latest = ContinuousSampleStore.GetLatestSampleTime();
+        string latestText = latest.HasValue
+            ? $"最近写入 {latest.Value:MM-dd HH:mm:ss}"
+            : "尚无采样数据";
+        _lblSamplerInfo.Text = _samplerEnabled
+            ? $"✅ 已启用 · {latestText} · 保留约 {ContinuousSampleStore.MaxFiles} 小时"
+            : $"未启用（重启后无法回放崩溃前读数）· {latestText}";
+    }
+
+    private async void OnSamplerToggled(object? sender, EventArgs e)
+    {
+        if (_updatingSampler) return;
+
+        bool wanted = _chkSampler.Checked;
+        _chkSampler.Enabled = false;
+        _lblSamplerInfo.Text = wanted ? "正在注册开机采样任务…" : "正在注销开机采样任务…";
+
+        string error = string.Empty;
+        bool ok = await Task.Run(() => wanted
+            ? SamplerAutoStart.Enable(Application.ExecutablePath, out error)
+            : SamplerAutoStart.Disable(out error));
+
+        _chkSampler.Enabled = true;
+        if (!ok)
+        {
+            MessageBox.Show(FindForm(),
+                (wanted ? "启用开机采样失败：" : "关闭开机采样失败：") + error,
+                "后台连续采样", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+
+            _updatingSampler = true;
+            _chkSampler.Checked = !wanted;
+            _updatingSampler = false;
+            UpdateSamplerInfoText();
+            return;
+        }
+
+        _samplerEnabled = wanted;
+        UpdateSamplerInfoText();
     }
 
     private static Label MakeTitle(string text) => new()
