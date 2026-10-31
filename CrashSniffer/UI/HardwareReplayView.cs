@@ -31,13 +31,12 @@ public class HardwareReplayView : UserControl
     {
         CheckOnClick = true,
         MultiColumn = true,
-        ColumnWidth = 170,
+        ColumnWidth = 150,
         IntegralHeight = false,
-        Height = 88,
-        Width = 680,
+        Dock = DockStyle.Fill,
         BorderStyle = BorderStyle.FixedSingle,
         BackColor = Color.White,
-        Margin = new Padding(0, 3, 10, 0),
+        Margin = new Padding(0, 4, 0, 6),
     };
 
     private readonly Button _btnCsv = new() { Text = "导出 CSV", AutoSize = true, Margin = new Padding(0, 4, 8, 0) };
@@ -146,34 +145,56 @@ public class HardwareReplayView : UserControl
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 4,
+            RowCount = 5,
             Padding = new Padding(10),
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 190));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        var top = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, WrapContents = false };
-        top.Controls.Add(new Label
+        // 标题 + 右侧导出按钮；指标选择框独占一行，避免在窄面板里只露出两三行
+        var header = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 2,
+            RowCount = 1,
+            Margin = new Padding(0),
+        };
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        header.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        header.Controls.Add(new Label
         {
             Text = "指标（同单位可叠加）：",
             AutoSize = true,
-            Margin = new Padding(0, 6, 4, 0),
-        });
+            Margin = new Padding(0, 8, 4, 0),
+        }, 0, 0);
+
+        var actions = new FlowLayoutPanel
+        {
+            AutoSize = true,
+            WrapContents = false,
+            Margin = new Padding(0),
+        };
+        _btnCsv.Margin = new Padding(0, 3, 8, 0);
+        _btnPng.Margin = new Padding(0, 3, 0, 0);
+        actions.Controls.Add(_btnCsv);
+        actions.Controls.Add(_btnPng);
+        header.Controls.Add(actions, 1, 0);
+        root.Controls.Add(header, 0, 0);
+
         RebuildMetrics(null);
         _clbMetrics.SetItemChecked(0, true);
         _clbMetrics.SetItemChecked(1, true);
         _clbMetrics.ItemCheck += OnMetricItemCheck;
-        top.Controls.Add(_clbMetrics);
-        top.Controls.Add(_btnCsv);
-        top.Controls.Add(_btnPng);
-        root.Controls.Add(top, 0, 0);
-        root.Controls.Add(_lblInfo, 0, 1);
-        root.Controls.Add(_rtbFindings, 0, 2);
+        root.Controls.Add(_clbMetrics, 0, 1);
+        root.Controls.Add(_lblInfo, 0, 2);
+        root.Controls.Add(_rtbFindings, 0, 3);
 
         _chartPanel.Paint += ChartPanel_Paint;
-        root.Controls.Add(_chartPanel, 0, 3);
+        root.Controls.Add(_chartPanel, 0, 4);
         Controls.Add(root);
 
         _btnCsv.Click += (_, _) => ExportCsv();

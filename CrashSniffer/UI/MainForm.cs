@@ -30,7 +30,8 @@ public class MainForm : Form
     private readonly ToolStripButton _btnRefresh = new("🔄 刷新扫描") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false, Font = new Font("Microsoft YaHei UI", 9, FontStyle.Bold) };
     private readonly ToolStripButton _btnExport = new("📦 导出报告包") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false, Font = new Font("Microsoft YaHei UI", 9, FontStyle.Bold) };
 
-    private readonly SplitContainer _split = new() { Orientation = Orientation.Vertical, Dock = DockStyle.Fill, SplitterDistance = 460, FixedPanel = FixedPanel.Panel1 };
+    private const int SplitterPreferred = 520;
+    private readonly SplitContainer _split = new() { Orientation = Orientation.Vertical, Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
     private readonly TabControl _rootTabs = new() { Dock = DockStyle.Fill, Font = new Font("Microsoft YaHei UI", 9) };
     private readonly TabPage _tabEvents = new("崩溃事件") { BackColor = Color.FromArgb(248, 250, 252) };
     private readonly TabPage _tabHistory = new("历史趋势") { BackColor = Color.FromArgb(248, 250, 252) };
@@ -91,7 +92,11 @@ public class MainForm : Form
         Text = "CrashSniffer · Windows 系统崩溃信息抓取工具";
         StartPosition = FormStartPosition.CenterScreen;
         MinimumSize = new Size(1080, 640);
-        Size = new Size(1440, 880);
+        // 初始尺寸不超过当前屏幕工作区，避免窗口超出屏幕被裁切
+        var workArea = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1440, 880);
+        Size = new Size(
+            Math.Max(MinimumSize.Width, Math.Min(1440, workArea.Width - 40)),
+            Math.Max(MinimumSize.Height, Math.Min(880, workArea.Height - 40)));
         Font = new Font("Microsoft YaHei UI", 9);
         BackColor = Color.FromArgb(248, 250, 252);
         Icon = IconFromFont();
@@ -142,12 +147,14 @@ public class MainForm : Form
         _btnRefresh.ForeColor = Color.FromArgb(0x04, 0x78, 0x57);
         _btnExport.ForeColor = Color.FromArgb(0x83, 0x18, 0xb4);
 
-        // DataGrid 列
+        // DataGrid 列：按比例铺满左侧面板，避免窄面板下后面的列被裁掉
         _grid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "ColTime",
             HeaderText = "时间",
-            Width = 145,
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            FillWeight = 23,
+            MinimumWidth = 110,
             DataPropertyName = "Time",
             DefaultCellStyle = new DataGridViewCellStyle { Format = "MM-dd HH:mm:ss", Font = new Font("Consolas", 9) }
         });
@@ -155,20 +162,26 @@ public class MainForm : Form
         {
             Name = "ColType",
             HeaderText = "类型",
-            Width = 140
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            FillWeight = 25,
+            MinimumWidth = 110
         });
         _grid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "ColCode",
             HeaderText = "停止代码",
-            Width = 150,
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            FillWeight = 27,
+            MinimumWidth = 120,
             DefaultCellStyle = new DataGridViewCellStyle { Font = new Font("Consolas", 9) }
         });
         _grid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "ColDriver",
             HeaderText = "嫌疑驱动",
-            Width = 190,
+            AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
+            FillWeight = 25,
+            MinimumWidth = 120,
             DefaultCellStyle = new DataGridViewCellStyle { Font = new Font("Consolas", 9) }
         });
 
@@ -217,6 +230,30 @@ public class MainForm : Form
         Controls.Add(_status);
 
         _status.Items.AddRange(new ToolStripItem[] { _lblStatus, _lblCount, _lblDump, _lblLog });
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        ApplyInitialSplit();
+    }
+
+    /// <summary>
+    /// 窗体完成布局后再设置分割位置与两侧最小宽度：
+    /// 控件尚未获得最终宽度时，Panel1MinSize 会触发 SplitterDistance 越界异常。
+    /// </summary>
+    private void ApplyInitialSplit()
+    {
+        int width = _split.Width;
+        if (width <= 0) return;
+
+        int max = width - _split.SplitterWidth - _split.Panel2MinSize;
+        if (max <= 0) return;
+        _split.SplitterDistance = Math.Min(SplitterPreferred, max);
+
+        int distance = _split.SplitterDistance;
+        _split.Panel1MinSize = Math.Min(420, distance);
+        _split.Panel2MinSize = Math.Min(460, width - distance - _split.SplitterWidth);
     }
 
     private void BindEvents()
@@ -379,6 +416,11 @@ public class MainForm : Form
 
     private void LoadGrid()
     {
+        // 重新扫描后尽量保留原选中项，避免详情区跳回第一条
+        CrashEvent? previous = _grid.SelectedRows.Count > 0 && _grid.SelectedRows[0].Tag is CrashEvent prev
+            ? prev
+            : null;
+
         _grid.Rows.Clear();
         foreach (var ev in _events)
         {
@@ -394,7 +436,20 @@ public class MainForm : Form
             row.Cells[3].Value = string.IsNullOrWhiteSpace(ev.SuspectDriver) ? "-" : Truncate(StripBracket(ev.SuspectDriver), 22);
             row.Tag = ev;
         }
-        if (_grid.Rows.Count > 0) _grid.Rows[0].Selected = true;
+
+        int selectIndex = previous == null ? 0 : _events.FindIndex(e =>
+            e.Time == previous.Time && e.Type == previous.Type && e.BugCheckCode == previous.BugCheckCode);
+        if (selectIndex < 0) selectIndex = 0;
+
+        // 第一行在 Rows.Add 时就会被自动选中并触发 SelectionChanged，
+        // 但那一刻 Tag 尚未赋值，详情会被清空；这里显式选中并刷新详情。
+        _grid.ClearSelection();
+        if (_grid.Rows.Count > 0)
+        {
+            _grid.CurrentCell = _grid.Rows[selectIndex].Cells[0];
+            _grid.Rows[selectIndex].Selected = true;
+        }
+        UpdateDetail();
     }
 
     private void UpdateDetail()

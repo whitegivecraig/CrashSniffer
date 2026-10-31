@@ -98,6 +98,8 @@ public class HardwareHealthTab : UserControl
     };
 
     private readonly Dictionary<string, ListViewItem> _driveItems = new();
+    private static readonly string[] DriveColumnNames = { "磁盘", "盘符", "温度", "寿命", "备用块", "已用", "读速", "写速", "累计写入" };
+    private static readonly int[] DriveColumnBaseWidths = { 190, 80, 70, 70, 70, 70, 85, 85, 95 };
     private readonly HardwareHealth[] _navLevels = new HardwareHealth[CategoryNames.Length];
     private readonly string[] _navSummaries = new string[CategoryNames.Length];
 
@@ -253,15 +255,9 @@ public class HardwareHealthTab : UserControl
         };
         _detailGrid.RowsDefaultCellStyle = _detailGrid.DefaultCellStyle;
 
-        _drivesList.Columns.Add("磁盘", 190);
-        _drivesList.Columns.Add("盘符", 80);
-        _drivesList.Columns.Add("温度", 70);
-        _drivesList.Columns.Add("寿命", 70);
-        _drivesList.Columns.Add("备用块", 70);
-        _drivesList.Columns.Add("已用", 70);
-        _drivesList.Columns.Add("读速", 85);
-        _drivesList.Columns.Add("写速", 85);
-        _drivesList.Columns.Add("累计写入", 95);
+        for (int i = 0; i < DriveColumnNames.Length; i++)
+            _drivesList.Columns.Add(DriveColumnNames[i], DriveColumnBaseWidths[i]);
+        _drivesList.Resize += (_, _) => AdjustDriveColumns();
 
         var detailHost = new Panel { Dock = DockStyle.Fill };
         detailHost.Controls.Add(_detailGrid);
@@ -732,6 +728,23 @@ public class HardwareHealthTab : UserControl
         using (var summaryBrush = new SolidBrush(TextGray))
             e.Graphics.DrawString(_navSummaries[e.Index] ?? "—", NavSummaryFont, summaryBrush,
                 e.Bounds.Left + 28, e.Bounds.Top + 26);
+    }
+
+    /// <summary>
+    /// 按比例放大所有列以铺满列表宽度，避免右侧留白或单列被拉出巨大空隙。
+    /// 窗口变窄时回落到基准列宽，出现横向滚动条。
+    /// </summary>
+    private void AdjustDriveColumns()
+    {
+        if (_drivesList.Columns.Count != DriveColumnBaseWidths.Length) return;
+        int available = _drivesList.ClientSize.Width - 2;
+        if (available <= 0) return;
+
+        int baseTotal = 0;
+        foreach (int w in DriveColumnBaseWidths) baseTotal += w;
+        double scale = Math.Max(1.0, (double)available / baseTotal);
+        for (int i = 0; i < DriveColumnBaseWidths.Length; i++)
+            _drivesList.Columns[i].Width = (int)Math.Round(DriveColumnBaseWidths[i] * scale);
     }
 
     private void RefreshDrives(HardwareReading r)
