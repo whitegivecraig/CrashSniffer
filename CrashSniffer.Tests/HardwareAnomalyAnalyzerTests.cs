@@ -162,6 +162,165 @@ public class HardwareAnomalyAnalyzerTests
     }
 
     [Fact]
+    public void Analyze_PerDriveOverheat_UsesDriveLabel()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading
+        {
+            Storages = new()
+            {
+                new()
+                {
+                    Id = "/nvme/3",
+                    Index = 3,
+                    Name = "SanDisk Ultra 3D NVMe",
+                    Volumes = { "C:" },
+                    Temperature = 68,
+                    LifePercent = 97,
+                },
+            },
+        });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Warning, anomaly.Severity);
+        Assert.Contains("磁盘 C: SanDisk Ultra 3D NVMe 温度偏高", anomaly.Title);
+        Assert.Contains("68.0℃", anomaly.Detail);
+    }
+
+    [Fact]
+    public void Analyze_LowDriveLife_ReturnsCritical()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading
+        {
+            Storages = new()
+            {
+                new()
+                {
+                    Id = "/hdd/0",
+                    Index = 0,
+                    Name = "ADATA SP580",
+                    Temperature = 33,
+                    LifePercent = 4,
+                },
+            },
+        });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Critical, anomaly.Severity);
+        Assert.Contains("剩余寿命低", anomaly.Title);
+        Assert.Contains("4%", anomaly.Detail);
+    }
+
+    [Fact]
+    public void Analyze_LegacySsdTemperature_StillCheckedWithoutPerDriveData()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading { SsdTemperature = 71 });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Critical, anomaly.Severity);
+        Assert.Contains("SSD 温度偏高", anomaly.Title);
+    }
+
+    [Fact]
+    public void Analyze_GpuMemoryOverheat_ReturnsCritical()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading { GpuMemoryTemperature = 101 });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Critical, anomaly.Severity);
+        Assert.Contains("GPU 显存温度偏高", anomaly.Title);
+    }
+
+    [Fact]
+    public void Analyze_MemoryNearlyFull_ReturnsWarning()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading { MemoryLoad = 96 });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Warning, anomaly.Severity);
+        Assert.Contains("内存占用过高", anomaly.Title);
+        Assert.Contains("96.0%", anomaly.Detail);
+    }
+
+    [Fact]
+    public void Analyze_MotherboardOverheat_ReturnsWarning()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading { MoboMaxTemperature = 86 });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Warning, anomaly.Severity);
+        Assert.Contains("主板温度偏高", anomaly.Title);
+    }
+
+    [Fact]
+    public void Analyze_LowCmosBattery_ReturnsWarning()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading { CmosBatteryVoltage = 2.7 });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Warning, anomaly.Severity);
+        Assert.Contains("CMOS 电池电压偏低", anomaly.Title);
+        Assert.Contains("CR2032", anomaly.Detail);
+    }
+
+    [Fact]
+    public void Analyze_LowAvailableSpare_ReturnsWarning()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading
+        {
+            Storages = new()
+            {
+                new()
+                {
+                    Id = "/nvme/1",
+                    Index = 1,
+                    Name = "Samsung SSD 990 PRO",
+                    Volumes = { "D:" },
+                    Temperature = 38,
+                    LifePercent = 92,
+                    AvailableSparePercent = 8,
+                    SpareThresholdPercent = 10,
+                },
+            },
+        });
+
+        var anomaly = Assert.Single(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+
+        Assert.Equal(AnomalySeverity.Warning, anomaly.Severity);
+        Assert.Contains("备用块不足", anomaly.Title);
+        Assert.Contains("厂商告警阈值 10%", anomaly.Detail);
+    }
+
+    [Fact]
+    public void Analyze_SpareWithoutThreshold_DoesNotReportAnomaly()
+    {
+        var readings = Series(6, 20, _ => new HardwareReading
+        {
+            Storages = new()
+            {
+                new()
+                {
+                    Id = "/nvme/1",
+                    Index = 1,
+                    Name = "Samsung SSD 990 PRO",
+                    Volumes = { "D:" },
+                    Temperature = 38,
+                    LifePercent = 92,
+                    AvailableSparePercent = 5,
+                },
+            },
+        });
+
+        Assert.Empty(HardwareAnomalyAnalyzer.Analyze(Window(readings.ToArray())));
+    }
+
+    [Fact]
     public void GetPreCrashReadings_ExcludesAfterCrashGraceAndSorts()
     {
         var snapshot = Window(

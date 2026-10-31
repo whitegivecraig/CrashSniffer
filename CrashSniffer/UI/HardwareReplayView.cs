@@ -89,26 +89,53 @@ public class HardwareReplayView : UserControl
         }
     }
 
-    private static readonly MetricDef[] Metrics =
+    private static readonly MetricDef[] BaseMetrics =
     {
         new("CPU 温度", "℃", r => r.CpuTemperature),
         new("GPU 温度", "℃", r => r.GpuTemperature),
         new("GPU 热点", "℃", r => r.GpuHotspot),
-        new("SSD 温度", "℃", r => r.SsdTemperature),
+        new("GPU 显存温度", "℃", r => r.GpuMemoryTemperature),
+        new("主板温度", "℃", r => r.MoboMaxTemperature),
+        new("磁盘最高温度", "℃", r => r.SsdTemperature),
         new("+12V", "V", r => r.Voltage12V),
         new("+5V", "V", r => r.Voltage5V),
         new("+3.3V", "V", r => r.Voltage3V),
+        new("+3V Standby", "V", r => r.Voltage3VStandby),
         new("Vcore", "V", r => r.CpuVoltage),
+        new("CPU SoC", "V", r => r.CpuSocVoltage),
+        new("GPU 电压", "V", r => r.GpuVoltage),
+        new("CMOS 电池", "V", r => r.CmosBatteryVoltage),
         new("CPU 负载", "%", r => r.CpuLoad),
+        new("CPU 最高核心负载", "%", r => r.CpuMaxCoreLoad),
         new("GPU 负载", "%", r => r.GpuLoad),
+        new("GPU 显存负载", "%", r => r.GpuMemoryLoad),
+        new("GPU 风扇", "%", r => r.GpuFanPercent),
+        new("内存占用", "%", r => r.MemoryLoad),
+        new("虚拟内存占用", "%", r => r.VirtualMemoryLoad),
+        new("GPU 显存占用", "%", r =>
+            r.GpuMemoryUsedMb.HasValue && r.GpuMemoryTotalMb is > 0
+                ? r.GpuMemoryUsedMb.Value / r.GpuMemoryTotalMb.Value * 100.0
+                : null),
+        new("磁盘最低寿命", "%", r => r.SsdLife),
+        new("磁盘最低备用块", "%", r =>
+        {
+            var spares = r.Storages
+                .Where(s => s.AvailableSparePercent.HasValue)
+                .Select(s => s.AvailableSparePercent!.Value)
+                .ToList();
+            return spares.Count > 0 ? spares.Min() : null;
+        }),
         new("CPU 风扇", "RPM", r => r.CpuFanRpm),
         new("GPU 风扇", "RPM", r => r.GpuFanRpm),
         new("CPU 频率", "MHz", r => r.CpuClock),
         new("GPU 频率", "MHz", r => r.GpuClock),
         new("CPU 功耗", "W", r => r.CpuPower),
         new("GPU 功耗", "W", r => r.GpuPower),
-        new("SSD 寿命", "%", r => r.SsdLife),
+        new("内存已用", "GB", r => r.MemoryUsedGb),
+        new("虚拟内存已用", "GB", r => r.VirtualMemoryUsedGb),
     };
+
+    private readonly List<MetricDef> _metrics = new();
 
     public HardwareReplayView()
     {
@@ -134,8 +161,7 @@ public class HardwareReplayView : UserControl
             AutoSize = true,
             Margin = new Padding(0, 6, 4, 0),
         });
-        foreach (var m in Metrics)
-            _clbMetrics.Items.Add($"{m.Label} ({m.Unit})");
+        RebuildMetrics(null);
         _clbMetrics.SetItemChecked(0, true);
         _clbMetrics.SetItemChecked(1, true);
         _clbMetrics.ItemCheck += OnMetricItemCheck;
@@ -160,6 +186,7 @@ public class HardwareReplayView : UserControl
     public void LoadSnapshot(HardwareSnapshot? snapshot)
     {
         _snapshot = snapshot;
+        RebuildMetrics(snapshot);
         if (snapshot == null || snapshot.Readings.Count == 0)
         {
             _lblInfo.Text = "该崩溃事件无硬件回放数据（监控未运行或窗口无读数）";
@@ -173,6 +200,63 @@ public class HardwareReplayView : UserControl
         _btnCsv.Enabled = _btnPng.Enabled = snapshot is { Readings.Count: > 0 };
         RenderFindings(snapshot);
         _chartPanel.Invalidate();
+    }
+
+    /// <summary>重建指标列表：固定指标 + 快照中出现的逐盘温度/寿命指标</summary>
+    private void RebuildMetrics(HardwareSnapshot? snapshot)
+    {
+        var checkedLabels = new HashSet<string>();
+        foreach (object? item in _clbMetrics.CheckedItems)
+        {
+            if (item?.ToString() is { } text)
+                checkedLabels.Add(text);
+        }
+
+        _metrics.Clear();
+        _metrics.AddRange(BaseMetrics);
+
+        if (snapshot != null)
+        {
+            foreach (var drive in StorageLabel.Representatives(snapshot))
+            {
+                string key = StorageLabel.Key(drive);
+                string label = StorageLabel.Short(drive);
+                _metrics.Add(new MetricDef($"磁盘 {label} 温度", "℃",
+                    r => StorageLabel.Find(r, key)?.Temperature));
+                _metrics.Add(new MetricDef($"磁盘 {label} 寿命", "%",
+                    r => StorageLabel.Find(r, key)?.LifePercent));
+                _metrics.Add(new MetricDef($"磁盘 {label} 备用块", "%",
+                    r => StorageLabel.Find(r, key)?.AvailableSparePercent));
+            }
+        }
+
+        _updatingChecks = true;
+        try
+        {
+            _clbMetrics.BeginUpdate();
+            _clbMetrics.Items.Clear();
+            foreach (var metric in _metrics)
+                _clbMetrics.Items.Add($"{metric.Label} ({metric.Unit})");
+
+            // 按显示文本恢复勾选（跨快照保持用户选择）
+            for (int i = 0; i < _metrics.Count; i++)
+            {
+                string label = $"{_metrics[i].Label} ({_metrics[i].Unit})";
+                if (checkedLabels.Contains(label))
+                    _clbMetrics.SetItemChecked(i, true);
+            }
+
+            if (_clbMetrics.CheckedItems.Count == 0 && _metrics.Count >= 2)
+            {
+                _clbMetrics.SetItemChecked(0, true);
+                _clbMetrics.SetItemChecked(1, true);
+            }
+        }
+        finally
+        {
+            _clbMetrics.EndUpdate();
+            _updatingChecks = false;
+        }
     }
 
     private void RenderFindings(HardwareSnapshot? snapshot)
@@ -225,17 +309,17 @@ public class HardwareReplayView : UserControl
 
     private void OnMetricItemCheck(object? sender, ItemCheckEventArgs e)
     {
-        if (_updatingChecks || e.Index < 0 || e.Index >= Metrics.Length) return;
+        if (_updatingChecks || e.Index < 0 || e.Index >= _metrics.Count) return;
         if (e.NewValue != CheckState.Checked) return;
 
         // 只允许同单位叠加，勾选新单位时自动取消其他单位的指标
-        string unit = Metrics[e.Index].Unit;
+        string unit = _metrics[e.Index].Unit;
         _updatingChecks = true;
         try
         {
-            for (int i = 0; i < Metrics.Length; i++)
+            for (int i = 0; i < _metrics.Count; i++)
             {
-                if (i != e.Index && Metrics[i].Unit != unit && _clbMetrics.GetItemChecked(i))
+                if (i != e.Index && _metrics[i].Unit != unit && _clbMetrics.GetItemChecked(i))
                     _clbMetrics.SetItemChecked(i, false);
             }
         }
@@ -249,7 +333,7 @@ public class HardwareReplayView : UserControl
     private List<int> GetCheckedMetricIndices()
     {
         var list = new List<int>();
-        for (int i = 0; i < Metrics.Length; i++)
+        for (int i = 0; i < _metrics.Count; i++)
             if (_clbMetrics.GetItemChecked(i)) list.Add(i);
         return list;
     }
@@ -361,7 +445,7 @@ public class HardwareReplayView : UserControl
         var series = new List<(MetricDef Def, Color Color, List<double?> Values)>();
         for (int k = 0; k < selected.Count; k++)
         {
-            var def = Metrics[selected[k]];
+            var def = _metrics[selected[k]];
             series.Add((def, SeriesPalette[k % SeriesPalette.Length], readings.Select(def.Get).ToList()));
         }
 

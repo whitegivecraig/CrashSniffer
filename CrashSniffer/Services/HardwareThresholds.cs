@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using CrashSniffer.Models;
 
 namespace CrashSniffer.Services;
@@ -26,9 +27,33 @@ public static class HardwareThresholds
     internal const double GpuTempWarn = 80.0;
     internal const double GpuTempCrit = 85.0;
 
+    // GPU 显存温度阈值（℃）
+    internal const double GpuMemTempWarn = 90.0;
+    internal const double GpuMemTempCrit = 100.0;
+
+    // GPU 热点温度阈值（℃）
+    internal const double GpuHotspotWarn = 100.0;
+    internal const double GpuHotspotCrit = 105.0;
+
+    // 主板 / SuperIO 传感器温度阈值（℃）
+    internal const double MoboTempWarn = 85.0;
+    internal const double MoboTempCrit = 95.0;
+
     // SSD 温度阈值（℃）
     internal const double SsdTempWarn = 65.0;
     internal const double SsdTempCrit = 70.0;
+
+    // 磁盘剩余寿命阈值（%，越低越危险）
+    internal const double SsdLifeWarn = 10.0;
+    internal const double SsdLifeCrit = 5.0;
+
+    // 内存占用阈值（%）
+    internal const double MemoryLoadWarn = 95.0;
+    internal const double MemoryLoadCrit = 99.0;
+
+    // CMOS 电池（CR2032）电压阈值（V，越低越危险）
+    internal const double CmosBatteryWarn = 2.8;
+    internal const double CmosBatteryCrit = 2.5;
 
     // 电压阈值：额定 ±5% 警告，±10% 危险
     internal const double V12Nominal = 12.0;
@@ -43,8 +68,45 @@ public static class HardwareThresholds
     public static HardwareHealth EvaluateGpuTemp(double? temp)
         => EvaluateTemp(temp, GpuTempWarn, GpuTempCrit);
 
+    public static HardwareHealth EvaluateGpuMemoryTemp(double? temp)
+        => EvaluateTemp(temp, GpuMemTempWarn, GpuMemTempCrit);
+
+    public static HardwareHealth EvaluateGpuHotspot(double? temp)
+        => EvaluateTemp(temp, GpuHotspotWarn, GpuHotspotCrit);
+
+    public static HardwareHealth EvaluateMoboTemp(double? temp)
+        => EvaluateTemp(temp, MoboTempWarn, MoboTempCrit);
+
     public static HardwareHealth EvaluateSsdTemp(double? temp)
         => EvaluateTemp(temp, SsdTempWarn, SsdTempCrit);
+
+    public static HardwareHealth EvaluateSsdLife(double? life)
+    {
+        if (life == null) return HardwareHealth.Unknown;
+        if (life <= SsdLifeCrit) return HardwareHealth.Critical;
+        if (life <= SsdLifeWarn) return HardwareHealth.Warning;
+        return HardwareHealth.Normal;
+    }
+
+    public static HardwareHealth EvaluateMemoryLoad(double? load)
+        => EvaluateTemp(load, MemoryLoadWarn, MemoryLoadCrit);
+
+    public static HardwareHealth EvaluateCmosBattery(double? voltage)
+    {
+        if (voltage == null) return HardwareHealth.Unknown;
+        if (voltage <= CmosBatteryCrit) return HardwareHealth.Critical;
+        if (voltage <= CmosBatteryWarn) return HardwareHealth.Warning;
+        return HardwareHealth.Normal;
+    }
+
+    /// <summary>NVMe 备用块余量低于厂商阈值时告警；余量为 0 视为危险</summary>
+    public static HardwareHealth EvaluateAvailableSpare(double? spare, double? threshold)
+    {
+        if (spare == null || threshold == null) return HardwareHealth.Unknown;
+        if (spare <= 0) return HardwareHealth.Critical;
+        if (spare <= threshold) return HardwareHealth.Warning;
+        return HardwareHealth.Normal;
+    }
 
     public static HardwareHealth EvaluateVoltage12V(double? v)
         => EvaluateVoltage(v, V12Nominal);
@@ -78,15 +140,37 @@ public static class HardwareThresholds
     /// </summary>
     public static HardwareHealth EvaluateOverall(HardwareReading r)
     {
-        var levels = new[]
+        var levels = new List<HardwareHealth>
         {
             EvaluateCpuTemp(r.CpuTemperature),
             EvaluateGpuTemp(r.GpuTemperature),
-            EvaluateSsdTemp(r.SsdTemperature),
+            EvaluateGpuHotspot(r.GpuHotspot),
+            EvaluateGpuMemoryTemp(r.GpuMemoryTemperature),
+            EvaluateMoboTemp(r.MoboMaxTemperature),
+            EvaluateMemoryLoad(r.MemoryLoad),
+            EvaluateMemoryLoad(r.VirtualMemoryLoad),
             EvaluateVoltage12V(r.Voltage12V),
             EvaluateVoltage5V(r.Voltage5V),
             EvaluateVoltage3V(r.Voltage3V),
+            EvaluateVoltage3V(r.Voltage3VStandby),
+            EvaluateCmosBattery(r.CmosBatteryVoltage),
         };
+
+        if (r.Storages is { Count: > 0 })
+        {
+            foreach (var storage in r.Storages)
+            {
+                levels.Add(EvaluateSsdTemp(storage.Temperature));
+                levels.Add(EvaluateSsdLife(storage.LifePercent));
+                levels.Add(EvaluateAvailableSpare(storage.AvailableSparePercent, storage.SpareThresholdPercent));
+            }
+        }
+        else
+        {
+            // 旧快照只有单盘汇总字段
+            levels.Add(EvaluateSsdTemp(r.SsdTemperature));
+            levels.Add(EvaluateSsdLife(r.SsdLife));
+        }
 
         HardwareHealth worst = HardwareHealth.Unknown;
         foreach (var l in levels)

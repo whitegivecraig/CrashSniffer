@@ -39,4 +39,30 @@ public class HardwareMonitorServiceTests : IDisposable
         Assert.False(service.TryRecordCrashWindow(DateTime.Now.AddMinutes(30), "Bsod"));
         Assert.Empty(HardwareSnapshotStore.ListEventIds());
     }
+
+    [Theory]
+    [InlineData("/nvme/1", 1)]
+    [InlineData("/hdd/0", 0)]
+    [InlineData("/hdd/4", 4)]
+    [InlineData("/", -1)]
+    [InlineData("", -1)]
+    [InlineData("/nvme/", -1)]
+    [InlineData("/nvme/abc", -1)]
+    public void ParseStorageIndex_ReturnsSuffixNumber(string identifier, int expected)
+    {
+        Assert.Equal(expected, HardwareMonitorService.ParseStorageIndex(identifier));
+    }
+
+    [Theory]
+    [InlineData("Fan #1", 1)]
+    [InlineData("Fan #12", 12)]
+    [InlineData("CPU Fan #2", 2)]
+    [InlineData("CPU Fan", -1)]
+    [InlineData("", -1)]
+    [InlineData("Fan #", -1)]
+    [InlineData("Fan #abc", -1)]
+    public void ParseTrailingIndex_ReturnsSuffixNumber(string name, int expected)
+    {
+        Assert.Equal(expected, HardwareMonitorService.ParseTrailingIndex(name));
+    }
 }

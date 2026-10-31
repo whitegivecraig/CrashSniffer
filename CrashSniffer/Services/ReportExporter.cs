@@ -426,7 +426,7 @@ public static class ReportExporter
             }
         }
 
-        sb.AppendLine("<footer><p>CrashSniffer v2.0 · 本报告由工具自动生成，建议结合 WinDbg 深入分析。</p></footer>");
+        sb.AppendLine("<footer><p>CrashSniffer v2.4 · 本报告由工具自动生成，建议结合 WinDbg 深入分析。</p></footer>");
         sb.AppendLine("</body></html>");
         return sb.ToString();
     }
@@ -447,12 +447,26 @@ public static class ReportExporter
         var parts = new List<string> { $"{pre.Count} 个采样点" };
         var cpuTemps = pre.Where(r => r.CpuTemperature.HasValue).Select(r => r.CpuTemperature!.Value).ToList();
         if (cpuTemps.Count > 0) parts.Add($"CPU 峰值 {cpuTemps.Max():F1}℃");
+        var maxCoreLoads = pre.Where(r => r.CpuMaxCoreLoad.HasValue).Select(r => r.CpuMaxCoreLoad!.Value).ToList();
+        if (maxCoreLoads.Count > 0) parts.Add($"最高核心负载 {maxCoreLoads.Max():F0}%");
         var gpuTemps = pre.Where(r => r.GpuTemperature.HasValue).Select(r => r.GpuTemperature!.Value).ToList();
         if (gpuTemps.Count > 0) parts.Add($"GPU 峰值 {gpuTemps.Max():F1}℃");
         var hotspots = pre.Where(r => r.GpuHotspot.HasValue).Select(r => r.GpuHotspot!.Value).ToList();
         if (hotspots.Count > 0) parts.Add($"热点峰值 {hotspots.Max():F1}℃");
+        var vramTemps = pre.Where(r => r.GpuMemoryTemperature.HasValue).Select(r => r.GpuMemoryTemperature!.Value).ToList();
+        if (vramTemps.Count > 0) parts.Add($"显存峰值 {vramTemps.Max():F1}℃");
+        var gpuFans = pre.Where(r => r.GpuFanPercent.HasValue).Select(r => r.GpuFanPercent!.Value).ToList();
+        if (gpuFans.Count > 0) parts.Add($"GPU 风扇峰值 {gpuFans.Max():F0}%");
+        var moboTemps = pre.Where(r => r.MoboMaxTemperature.HasValue).Select(r => r.MoboMaxTemperature!.Value).ToList();
+        if (moboTemps.Count > 0) parts.Add($"主板峰值 {moboTemps.Max():F1}℃");
+        var memoryLoads = pre.Where(r => r.MemoryLoad.HasValue).Select(r => r.MemoryLoad!.Value).ToList();
+        if (memoryLoads.Count > 0) parts.Add($"内存峰值 {memoryLoads.Max():F1}%");
+        var memoryUsed = pre.Where(r => r.MemoryUsedGb.HasValue).Select(r => r.MemoryUsedGb!.Value).ToList();
+        if (memoryUsed.Count > 0) parts.Add($"内存已用峰值 {memoryUsed.Max():F1}GB");
         var v12 = pre.Where(r => r.Voltage12V.HasValue).Select(r => r.Voltage12V!.Value).ToList();
         if (v12.Count > 0) parts.Add($"+12V {v12.Min():F2}–{v12.Max():F2}V");
+        var cmos = pre.Where(r => r.CmosBatteryVoltage.HasValue).Select(r => r.CmosBatteryVoltage!.Value).ToList();
+        if (cmos.Count > 0) parts.Add($"CMOS 电池 {cmos.Min():F2}V");
         sb.AppendLine($"<p class=\"meta\" style=\"margin:0 0 8px\">{string.Join(" · ", parts)}</p>");
 
         var anomalies = HardwareAnomalyAnalyzer.Analyze(snapshot);
@@ -482,9 +496,57 @@ public static class ReportExporter
             sb.AppendLine("</ul>");
         }
 
+        AppendDriveTable(sb, snapshot, pre);
+
         sb.AppendLine("<p class=\"meta\" style=\"margin:8px 0 0\">结论基于崩溃前窗口的传感器读数，均为疑似异常，请结合散热与供电情况判断。</p>");
         sb.AppendLine("</div>");
         return sb.ToString();
+    }
+
+    /// <summary>崩溃前窗口内的逐盘摘要表</summary>
+    private static void AppendDriveTable(StringBuilder sb, HardwareSnapshot snapshot, List<HardwareReading> pre)
+    {
+        var representatives = StorageLabel.Representatives(snapshot);
+        if (representatives.Count == 0) return;
+
+        var rows = new List<string>();
+        foreach (var rep in representatives)
+        {
+            string key = StorageLabel.Key(rep);
+            var samples = pre
+                .Where(r => r.Storages != null)
+                .SelectMany(r => r.Storages)
+                .Where(s => StorageLabel.Key(s) == key)
+                .ToList();
+            if (samples.Count == 0) continue;
+
+            string name = samples.Select(s => s.Name)
+                .FirstOrDefault(n => !string.IsNullOrWhiteSpace(n)) ?? rep.Name;
+            string volumes = samples.Select(s => string.Join(", ", s.Volumes))
+                .FirstOrDefault(v => v.Length > 0) ?? "—";
+            var temps = samples.Where(s => s.Temperature.HasValue).Select(s => s.Temperature!.Value).ToList();
+            var lives = samples.Where(s => s.LifePercent.HasValue).Select(s => s.LifePercent!.Value).ToList();
+            var spares = samples.Where(s => s.AvailableSparePercent.HasValue).Select(s => s.AvailableSparePercent!.Value).ToList();
+            var used = samples.Where(s => s.UsedSpacePercent.HasValue).Select(s => s.UsedSpacePercent!.Value).ToList();
+            var written = samples.Where(s => s.TotalWrittenGb.HasValue).Select(s => s.TotalWrittenGb!.Value).ToList();
+
+            rows.Add(
+                $"<tr><td>{Escape(string.IsNullOrWhiteSpace(name) ? StorageLabel.Short(rep) : name)}</td>" +
+                $"<td>{Escape(volumes)}</td>" +
+                $"<td>{(temps.Count > 0 ? $"{temps.Max():F1}℃" : "—")}</td>" +
+                $"<td>{(lives.Count > 0 ? $"{lives.Min():F0}%" : "—")}</td>" +
+                $"<td>{(spares.Count > 0 ? $"{spares.Min():F0}%" : "—")}</td>" +
+                $"<td>{(used.Count > 0 ? $"{used.Max():F1}%" : "—")}</td>" +
+                $"<td>{(written.Count > 0 ? $"{written.Max() / 1024.0:F2} TB" : "—")}</td></tr>");
+        }
+
+        if (rows.Count == 0) return;
+
+        sb.AppendLine("<table class=\"rel-tbl\" style=\"margin-top:10px\"><thead><tr>" +
+                      "<th>磁盘</th><th>盘符</th><th>峰值温度</th><th>剩余寿命</th><th>备用块</th><th>已用空间</th><th>累计写入</th>" +
+                      "</tr></thead><tbody>");
+        foreach (string row in rows) sb.AppendLine(row);
+        sb.AppendLine("</tbody></table>");
     }
 
     /// <summary>

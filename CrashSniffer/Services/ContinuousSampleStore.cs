@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using CrashSniffer.Models;
 
 namespace CrashSniffer.Services;
@@ -35,6 +36,7 @@ public static class ContinuousSampleStore
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
     };
 
     /// <summary>追加一批读数（内部按小时分文件）</summary>

@@ -6,14 +6,13 @@ using CrashSniffer.Models;
 namespace CrashSniffer.Services;
 
 /// <summary>
-/// 崩溃前硬件读数分析：识别温度过高/骤升、供电电压偏离、降频、风扇停转等疑似异常。
+/// 崩溃前硬件读数分析：识别温度过高/骤升、供电电压偏离、降频、风扇停转、
+/// 磁盘过热/寿命不足、显存/内存/主板异常等疑似问题。
 /// 基于崩溃前窗口内的采样点，结论仅作为排障方向提示（传感器精度有限）。
 /// </summary>
 public static class HardwareAnomalyAnalyzer
 {
     private const int MinSamplesForTrend = 6;
-    private const double GpuHotspotWarn = 100.0;
-    private const double GpuHotspotCrit = 105.0;
     private const double TempSpikeDelta = 15.0;
     private const double FanTempThreshold = 80.0;
     private const double CpuClockDropRatio = 0.6;
@@ -40,10 +39,12 @@ public static class HardwareAnomalyAnalyzer
 
         AnalyzeCpu(pre, snapshot.CrashTime, result);
         AnalyzeGpu(pre, result);
-        AnalyzeSsd(pre, result);
+        AnalyzeStorage(pre, result);
         AnalyzeVoltage(pre, r => r.Voltage12V, HardwareThresholds.V12Nominal, "+12V", result);
         AnalyzeVoltage(pre, r => r.Voltage5V, HardwareThresholds.V5Nominal, "+5V", result);
         AnalyzeVoltage(pre, r => r.Voltage3V, HardwareThresholds.V3Nominal, "+3.3V", result);
+        AnalyzeMemory(pre, result);
+        AnalyzeMotherboard(pre, result);
         AnalyzeFans(pre, result);
 
         return result;
@@ -133,17 +134,107 @@ public static class HardwareAnomalyAnalyzer
         {
             var peak = hotspots.OrderByDescending(r => r.GpuHotspot!.Value).First();
             double max = peak.GpuHotspot!.Value;
-            if (max >= GpuHotspotWarn)
+            var level = HardwareThresholds.EvaluateGpuHotspot(max);
+            if (level is HardwareHealth.Warning or HardwareHealth.Critical)
             {
                 result.Add(Anomaly(
-                    max >= GpuHotspotCrit ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+                    level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
                     "GPU 热点温度偏高（疑似过热）",
-                    $"峰值 {max:F1}℃（{peak.Timestamp:HH:mm:ss}），警戒线 {GpuHotspotWarn:0}℃ / 危险线 {GpuHotspotCrit:0}℃。"));
+                    $"峰值 {max:F1}℃（{peak.Timestamp:HH:mm:ss}），警戒线 {HardwareThresholds.GpuHotspotWarn:0}℃ / " +
+                    $"危险线 {HardwareThresholds.GpuHotspotCrit:0}℃。"));
+            }
+        }
+
+        var memoryTemps = pre.Where(r => r.GpuMemoryTemperature.HasValue).ToList();
+        if (memoryTemps.Count > 0)
+        {
+            var peak = memoryTemps.OrderByDescending(r => r.GpuMemoryTemperature!.Value).First();
+            double max = peak.GpuMemoryTemperature!.Value;
+            var level = HardwareThresholds.EvaluateGpuMemoryTemp(max);
+            if (level is HardwareHealth.Warning or HardwareHealth.Critical)
+            {
+                result.Add(Anomaly(
+                    level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+                    "GPU 显存温度偏高（疑似显存过热）",
+                    $"峰值 {max:F1}℃（{peak.Timestamp:HH:mm:ss}），警戒线 {HardwareThresholds.GpuMemTempWarn:0}℃ / " +
+                    $"危险线 {HardwareThresholds.GpuMemTempCrit:0}℃。"));
             }
         }
     }
 
-    private static void AnalyzeSsd(List<HardwareReading> pre, List<HardwareAnomaly> result)
+    /// <summary>磁盘：有逐盘数据时逐块分析，旧快照回退到单盘汇总字段</summary>
+    private static void AnalyzeStorage(List<HardwareReading> pre, List<HardwareAnomaly> result)
+    {
+        bool hasPerDrive = pre.Any(r => r.Storages is { Count: > 0 });
+        if (!hasPerDrive)
+        {
+            AnalyzeStorageLegacy(pre, result);
+            return;
+        }
+
+        var drives = new Dictionary<string, DriveStats>();
+        foreach (var reading in pre)
+        {
+            if (reading.Storages == null) continue;
+            foreach (var storage in reading.Storages)
+            {
+                string key = StorageLabel.Key(storage);
+                if (!drives.TryGetValue(key, out var stats))
+                    drives[key] = stats = new DriveStats(storage);
+                stats.Observe(storage, reading.Timestamp);
+            }
+        }
+
+        foreach (var stats in drives.Values)
+        {
+            string label = StorageLabel.Full(stats.Display);
+
+            if (stats.TemperaturePeak.HasValue)
+            {
+                double max = stats.TemperaturePeak.Value;
+                var level = HardwareThresholds.EvaluateSsdTemp(max);
+                if (level is HardwareHealth.Warning or HardwareHealth.Critical)
+                {
+                    result.Add(Anomaly(
+                        level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+                        $"磁盘 {label} 温度偏高（疑似过热）",
+                        $"峰值 {max:F1}℃（{stats.TemperaturePeakTime:HH:mm:ss}），" +
+                        $"警戒线 {HardwareThresholds.SsdTempWarn:0}℃ / 危险线 {HardwareThresholds.SsdTempCrit:0}℃。"));
+                }
+            }
+
+            if (stats.LifeMin.HasValue)
+            {
+                double min = stats.LifeMin.Value;
+                var level = HardwareThresholds.EvaluateSsdLife(min);
+                if (level is HardwareHealth.Warning or HardwareHealth.Critical)
+                {
+                    result.Add(Anomaly(
+                        level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+                        $"磁盘 {label} 剩余寿命低（疑似老化）",
+                        $"最低剩余寿命 {min:F0}%（{stats.LifeMinTime:HH:mm:ss}），" +
+                        $"警戒线 {HardwareThresholds.SsdLifeWarn:0}% / 危险线 {HardwareThresholds.SsdLifeCrit:0}%。"));
+                }
+            }
+
+            if (stats.SpareMin.HasValue && stats.SpareThresholdMax.HasValue)
+            {
+                double spare = stats.SpareMin.Value;
+                double threshold = stats.SpareThresholdMax.Value;
+                var level = HardwareThresholds.EvaluateAvailableSpare(spare, threshold);
+                if (level is HardwareHealth.Warning or HardwareHealth.Critical)
+                {
+                    result.Add(Anomaly(
+                        level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+                        $"磁盘 {label} 备用块不足（疑似闪存磨损）",
+                        $"最低备用块 {spare:F0}%（{stats.SpareMinTime:HH:mm:ss}），" +
+                        $"厂商告警阈值 {threshold:F0}%，建议尽快备份数据。"));
+                }
+            }
+        }
+    }
+
+    private static void AnalyzeStorageLegacy(List<HardwareReading> pre, List<HardwareAnomaly> result)
     {
         var temps = pre.Where(r => r.SsdTemperature.HasValue).ToList();
         if (temps.Count == 0) return;
@@ -158,6 +249,66 @@ public static class HardwareAnomalyAnalyzer
                 "SSD 温度偏高（疑似过热）",
                 $"峰值 {max:F1}℃（{peak.Timestamp:HH:mm:ss}），警戒线 {HardwareThresholds.SsdTempWarn:0}℃ / " +
                 $"危险线 {HardwareThresholds.SsdTempCrit:0}℃。"));
+        }
+    }
+
+    private static void AnalyzeMemory(List<HardwareReading> pre, List<HardwareAnomaly> result)
+    {
+        AnalyzeLoad(pre, r => r.MemoryLoad, "内存占用过高（疑似内存不足）", "物理内存占用", result);
+        AnalyzeLoad(pre, r => r.VirtualMemoryLoad, "虚拟内存占用过高（疑似页面文件不足）", "虚拟内存占用", result);
+    }
+
+    private static void AnalyzeLoad(List<HardwareReading> pre, Func<HardwareReading, double?> selector,
+        string title, string label, List<HardwareAnomaly> result)
+    {
+        var samples = pre.Where(r => selector(r).HasValue).ToList();
+        if (samples.Count == 0) return;
+
+        var peak = samples.OrderByDescending(r => selector(r)!.Value).First();
+        double max = selector(peak)!.Value;
+        var level = HardwareThresholds.EvaluateMemoryLoad(max);
+        if (level is not (HardwareHealth.Warning or HardwareHealth.Critical)) return;
+
+        result.Add(Anomaly(
+            level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+            title,
+            $"{label}峰值 {max:F1}%（{peak.Timestamp:HH:mm:ss}），" +
+            $"警戒线 {HardwareThresholds.MemoryLoadWarn:0}% / 危险线 {HardwareThresholds.MemoryLoadCrit:0}%。"));
+    }
+
+    private static void AnalyzeMotherboard(List<HardwareReading> pre, List<HardwareAnomaly> result)
+    {
+        var temps = pre.Where(r => r.MoboMaxTemperature.HasValue).ToList();
+        if (temps.Count > 0)
+        {
+            var peak = temps.OrderByDescending(r => r.MoboMaxTemperature!.Value).First();
+            double max = peak.MoboMaxTemperature!.Value;
+            var level = HardwareThresholds.EvaluateMoboTemp(max);
+            if (level is HardwareHealth.Warning or HardwareHealth.Critical)
+            {
+                result.Add(Anomaly(
+                    level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+                    "主板温度偏高（疑似供电/芯片组过热）",
+                    $"传感器最高 {max:F1}℃（{peak.Timestamp:HH:mm:ss}），" +
+                    $"警戒线 {HardwareThresholds.MoboTempWarn:0}℃ / 危险线 {HardwareThresholds.MoboTempCrit:0}℃。"));
+            }
+        }
+
+        var cmos = pre.Where(r => r.CmosBatteryVoltage.HasValue).ToList();
+        if (cmos.Count > 0)
+        {
+            var low = cmos.OrderBy(r => r.CmosBatteryVoltage!.Value).First();
+            double min = low.CmosBatteryVoltage!.Value;
+            var level = HardwareThresholds.EvaluateCmosBattery(min);
+            if (level is HardwareHealth.Warning or HardwareHealth.Critical)
+            {
+                result.Add(Anomaly(
+                    level == HardwareHealth.Critical ? AnomalySeverity.Critical : AnomalySeverity.Warning,
+                    "CMOS 电池电压偏低（可能无法保存 BIOS 设置）",
+                    $"最低 {min:F2}V（{low.Timestamp:HH:mm:ss}），" +
+                    $"警戒线 {HardwareThresholds.CmosBatteryWarn:0.0}V / 危险线 {HardwareThresholds.CmosBatteryCrit:0.0}V，" +
+                    "建议更换 CR2032 纽扣电池。"));
+            }
         }
     }
 
@@ -202,4 +353,51 @@ public static class HardwareAnomalyAnalyzer
 
     private static HardwareAnomaly Anomaly(AnomalySeverity severity, string title, string detail)
         => new() { Severity = severity, Title = title, Detail = detail };
+
+    private sealed class DriveStats
+    {
+        public StorageReading Display { get; private set; }
+        public double? TemperaturePeak { get; private set; }
+        public DateTime TemperaturePeakTime { get; private set; }
+        public double? LifeMin { get; private set; }
+        public DateTime LifeMinTime { get; private set; }
+        public double? SpareMin { get; private set; }
+        public DateTime SpareMinTime { get; private set; }
+        public double? SpareThresholdMax { get; private set; }
+
+        public DriveStats(StorageReading first) => Display = first;
+
+        public void Observe(StorageReading storage, DateTime time)
+        {
+            if (Display.Volumes.Count == 0 && storage.Volumes.Count > 0)
+                Display = storage;
+
+            if (storage.Temperature.HasValue &&
+                (TemperaturePeak == null || storage.Temperature.Value > TemperaturePeak.Value))
+            {
+                TemperaturePeak = storage.Temperature;
+                TemperaturePeakTime = time;
+            }
+
+            if (storage.LifePercent.HasValue &&
+                (LifeMin == null || storage.LifePercent.Value < LifeMin.Value))
+            {
+                LifeMin = storage.LifePercent;
+                LifeMinTime = time;
+            }
+
+            if (storage.AvailableSparePercent.HasValue &&
+                (SpareMin == null || storage.AvailableSparePercent.Value < SpareMin.Value))
+            {
+                SpareMin = storage.AvailableSparePercent;
+                SpareMinTime = time;
+            }
+
+            if (storage.SpareThresholdPercent.HasValue &&
+                (SpareThresholdMax == null || storage.SpareThresholdPercent.Value > SpareThresholdMax.Value))
+            {
+                SpareThresholdMax = storage.SpareThresholdPercent;
+            }
+        }
+    }
 }

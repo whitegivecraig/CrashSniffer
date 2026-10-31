@@ -44,6 +44,41 @@ public class ContinuousSampleStoreTests : IDisposable
     }
 
     [Fact]
+    public void Append_ThenLoadRange_RoundtripsStorageDetails()
+    {
+        var t0 = new DateTime(2026, 10, 28, 10, 0, 0);
+        ContinuousSampleStore.Append(new[]
+        {
+            new HardwareReading
+            {
+                Timestamp = t0,
+                MemoryLoad = 44.4,
+                Storages = new()
+                {
+                    new()
+                    {
+                        Id = "/nvme/3",
+                        Index = 3,
+                        Name = "SanDisk Ultra 3D NVMe",
+                        Volumes = { "C:" },
+                        Temperature = 49,
+                        LifePercent = 97,
+                    },
+                },
+            },
+        });
+
+        var reading = Assert.Single(ContinuousSampleStore.LoadRange(t0.AddSeconds(-1), t0.AddSeconds(1)));
+
+        Assert.Equal(44.4, reading.MemoryLoad!.Value, 3);
+        var storage = Assert.Single(reading.Storages);
+        Assert.Equal("/nvme/3", storage.Id);
+        Assert.Equal("C:", Assert.Single(storage.Volumes));
+        Assert.Equal(49, storage.Temperature!.Value, 3);
+        Assert.Equal(97, storage.LifePercent!.Value, 3);
+    }
+
+    [Fact]
     public void Append_SplitsFilesByHour()
     {
         var t0 = new DateTime(2026, 10, 28, 10, 59, 50);

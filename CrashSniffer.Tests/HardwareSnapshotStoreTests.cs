@@ -49,6 +49,65 @@ public class HardwareSnapshotStoreTests : IDisposable
     }
 
     [Fact]
+    public void SaveAndLoad_PersistsStorageDetails()
+    {
+        var snap = new HardwareSnapshot
+        {
+            EventId = "test_event_storage",
+            CrashTime = new DateTime(2026, 10, 28, 12, 0, 0),
+            CrashType = "BSOD",
+            Readings = new()
+            {
+                new()
+                {
+                    Timestamp = new DateTime(2026, 10, 28, 11, 55, 0),
+                    GpuMemoryTemperature = 88,
+                    GpuMemoryUsedMb = 8192,
+                    MemoryLoad = 62,
+                    MoboMaxTemperature = 55,
+                    Storages = new()
+                    {
+                        new()
+                        {
+                            Id = "/nvme/1",
+                            Index = 1,
+                            Name = "HP SSD SP803 2TB",
+                            Volumes = { "E:" },
+                            Temperature = 44,
+                            LifePercent = 99,
+                            UsedSpacePercent = 62.4,
+                            ReadRateMBps = 12.5,
+                            WriteRateMBps = 3.2,
+                            TotalReadGb = 50891,
+                            TotalWrittenGb = 36341,
+                        },
+                    },
+                },
+            },
+        };
+
+        HardwareSnapshotStore.Save(snap);
+        var loaded = HardwareSnapshotStore.Load(snap.EventId);
+
+        Assert.NotNull(loaded);
+        var reading = Assert.Single(loaded!.Readings);
+        Assert.Equal(88, reading.GpuMemoryTemperature!.Value, 3);
+        Assert.Equal(8192, reading.GpuMemoryUsedMb!.Value, 3);
+        Assert.Equal(62, reading.MemoryLoad!.Value, 3);
+        Assert.Equal(55, reading.MoboMaxTemperature!.Value, 3);
+
+        var storage = Assert.Single(reading.Storages);
+        Assert.Equal("/nvme/1", storage.Id);
+        Assert.Equal(1, storage.Index);
+        Assert.Equal("E:", Assert.Single(storage.Volumes));
+        Assert.Equal(44, storage.Temperature!.Value, 3);
+        Assert.Equal(99, storage.LifePercent!.Value, 3);
+        Assert.Equal(62.4, storage.UsedSpacePercent!.Value, 3);
+        Assert.Equal(12.5, storage.ReadRateMBps!.Value, 3);
+        Assert.Equal(36341, storage.TotalWrittenGb!.Value, 3);
+    }
+
+    [Fact]
     public void Load_NonExistent_ReturnsNull()
     {
         Assert.Null(HardwareSnapshotStore.Load("does_not_exist"));
