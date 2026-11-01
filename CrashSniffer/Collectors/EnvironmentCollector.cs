@@ -64,11 +64,11 @@ public static class EnvironmentCollector
                 using (o)
                 {
                     snap.BiosVersion = (o["SMBIOSBIOSVersion"] as string)?.Trim() ?? string.Empty;
-                    if (o["ReleaseDate"] is string dmtf && DateTime.TryParseExact(
-                            dmtf.Substring(0, 14), "yyyyMMddHHmmss",
-                            System.Globalization.CultureInfo.InvariantCulture,
-                            System.Globalization.DateTimeStyles.None, out var dt))
-                        snap.BiosDate = dt.ToString("yyyy-MM-dd");
+                    if (o["ReleaseDate"] is string dmtf)
+                    {
+                        string? date = ParseWmiDate(dmtf);
+                        if (date != null) snap.BiosDate = date;
+                    }
                     break;
                 }
             }
@@ -112,11 +112,11 @@ public static class EnvironmentCollector
                         Name = (o["Name"] as string)?.Trim() ?? "",
                         DriverVersion = (o["DriverVersion"] as string)?.Trim() ?? "",
                     };
-                    if (o["DriverDate"] is string dmtf && DateTime.TryParseExact(
-                            dmtf.Substring(0, 14), "yyyyMMddHHmmss",
-                            System.Globalization.CultureInfo.InvariantCulture,
-                            System.Globalization.DateTimeStyles.None, out var dt))
-                        gpu.DriverDate = dt.ToString("yyyy-MM-dd");
+                    if (o["DriverDate"] is string dmtf)
+                    {
+                        string? date = ParseWmiDate(dmtf);
+                        if (date != null) gpu.DriverDate = date;
+                    }
                     if (o["AdapterRAM"] is uint ram)
                         gpu.AdapterRamMb = ram / (1024 * 1024); // WMI uint32 上限 4GB，超过的显示 4095
                     if (!string.IsNullOrEmpty(gpu.Name))
@@ -271,6 +271,25 @@ public static class EnvironmentCollector
     }
 
     // —— 辅助 ——
+
+    internal static string? ParseWmiDate(string? dmtf)
+    {
+        if (string.IsNullOrWhiteSpace(dmtf)) return null;
+        dmtf = dmtf.Trim();
+        if (dmtf.Length >= 14 && DateTime.TryParseExact(
+                dmtf.Substring(0, 14), "yyyyMMddHHmmss",
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var dt))
+        {
+            return dt.ToString("yyyy-MM-dd");
+        }
+        if (DateTime.TryParse(dmtf, System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.None, out var fallbackDt))
+        {
+            return fallbackDt.ToString("yyyy-MM-dd");
+        }
+        return null;
+    }
 
     private static uint ToUint(object? v)
     {

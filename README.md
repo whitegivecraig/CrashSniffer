@@ -1,71 +1,69 @@
 # 🪦 CrashSniffer
 
-**Windows 系统崩溃信息抓取工具** —— 崩溃/蓝屏重启后一键采集 BSOD / WHEA / TDR / LiveKernel / 事件日志，内置停止代码知识库与排障建议，生成可直接分享的排障报告。
+**Windows 系统崩溃诊断与硬件黑匣子监控工具** —— 崩溃/蓝屏重启后一键抓取并深度解析 **Minidump (`PAGEDU64` 崩溃模块偏移)** / **BSOD** / **WHEA** / **GPU TDR** / **LiveKernel** / **系统事件日志**；内置 **免 `WinRing0` 驱动的硬件传感器直采引擎** 与 **崩溃前 10 分钟黑匣子回放**，支持 **系统转储配置体检与一键修复**、**论坛求诊帖一键生成**，并自动打包关联 `.dmp` 转储文件与现代交互式 `report.html` 排障报告。
 
-> 适合 DIY 玩家、装机与超频排障场景：显卡 TDR、WHEA 硬件错误、内存 XMP/EXPO 不稳、驱动冲突……崩溃之后不用再手动翻事件查看器、找 WinDbg。
+> 适合 DIY 玩家、装机与超频排障场景：显卡 TDR 掉驱动、WHEA 硬件错误、内存 XMP/EXPO 不稳、CPU PBO/CO 负压过激、电源偏离……崩溃之后无需手动翻事件查看器、无需安装数十 GB 的 WinDbg，也不会因为传统 `WinRing0` 驱动被 Windows Defender 拦截报毒。
 
 ## ✨ 功能特性
 
-### 一键采集
-- **Minidump / MEMORY.DMP 解析**：内置解析器直接提取停止代码、BugCheck 参数与嫌疑驱动，不依赖 WinDbg
-- **系统事件日志**：Kernel-Power 41、BugCheck 1001、EventLog 6008、WHEA-Logger、Display TDR（4101~4105）、nvlddmkm / amdkmdag 显卡驱动事件
-- **LiveKernelReports**：抓取 GPU 等设备挂死但未蓝屏时留下的 dump
-- **环境快照**：CPU / 主板 / BIOS / 显卡与驱动版本 / 内存频率（含 XMP/EXPO 状态推断）/ 芯片组驱动版本 / Windows 内存诊断结果
+### 🔍 深度采集与内核转储解析
+- **PAGEDU64 `_TRIAGE_DUMP64` 深度解析**：无需 WinDbg，直接解析 Windows 64 位内核转储的 `_EXCEPTION_RECORD64`、`_CONTEXT` (`RIP`) 与已加载内核模块表，精准定位**崩溃指令地址**与**故障模块+偏移量**（如 `amdkmdag.sys+0x1D0FB0`）及精确时间戳
+- **全量转储关联保留**：同一崩溃聚合窗口内的多个 `.dmp` 文件（如 `Watchdog` 连续生成的多个 `LiveKernelReports` + `Minidump`）全部保留在 `AssociatedDumpPaths` 中，绝不覆盖丢失
+- **系统事件日志全覆盖**：`Kernel-Power 41`、`WER-SystemErrorReporting 1001`（自动解析 `param1`/`param2` 十六进制蓝屏代码与四维参数）、`EventLog 6008`、`WHEA-Logger`（含 17/18/19/46/47 全事件 ID 部位识别）、`Display TDR (4101~4105)`、`nvlddmkm` / `amdkmdag` 显卡驱动事件，以及 **`DriverFrameworks-UserMode (10110/10111)` 用户态驱动宿主崩溃**
+- **环境快照与变更追踪**：自动采集 CPU / 主板 / BIOS / 显卡与驱动版本（规范化 `YYYY-MM-DD` 日期） / 内存频率（含 XMP/EXPO 状态推断） / 芯片组驱动 / Windows 内存诊断结果，每次扫描自动比对环境变更并关联「事发前变更」
 
-### 智能分析
-- 30 分钟时间窗口内将同一崩溃的多条记录归并为单一事件（严重度：BSOD > WHEA > TDR > Event 41 > 6008）
-- 30+ 常见停止代码的中文解释与针对性排障建议
-- 嫌疑驱动排行（"惯犯名单"），并附系统内实际驱动版本
-- WHEA 事件细化解析：直接给出出错部位结论（CPU / PCIe 设备 / 内存）
-- 崩溃前后 ±5 分钟关联事件一览，方便还原现场
-- 环境变更检测：每次扫描自动记录硬件/驱动快照，BIOS 刷新、驱动升级、Windows 更新、XMP 开关等变更一目了然，崩溃详情自动关联「事发前变更」
+### 🧠 智能分析与排障工具箱
+- **智能事件聚合与实时检索**：30 分钟窗口自动归并同源崩溃（严重度：`BSOD > WHEA > TDR > Event 41 > 6008`）；支持按事件类型快速过滤与关键词实时搜索（驱动名、错误码、模块偏移等）
+- **停止代码与驱动知识库**：内置 30+ 常见蓝屏停止代码与 70+ 常见内核/外设/反作弊/RGB 驱动中文解读及针对性排障建议，自动统计「惯犯驱动排行」
+- **🔧 系统转储配置体检与一键修复**：自动检测注册表 `CrashControl`（小内存转储是否开启、`AlwaysKeepMemoryDump` 防覆盖、系统日志写入、分页文件大小、`Minidump` 目录），发现配置缺失可一键修复，避免下次蓝屏不留 `.dmp`
+- **📋 一键生成求诊帖**：支持将当前选中崩溃或全局汇总一键生成结构化 Markdown 排障帖（含环境配置、蓝屏代码、模块偏移、硬件异常摘要與已关联转储清单）并复制到剪贴板，可直接发往贴吧 / NGA / Chiphell / V2EX
+- **📂 一键导出 / 定位 `.dmp`**：详情页与顶部工具栏支持一键在资源管理器中高亮定位原始 `.dmp` 文件，或将选中事件的全部关联 `.dmp` 单独导出到指定目录
 
-### 硬件健康监控
-- **实时看板**：左侧分类导航（CPU / GPU / 内存 / 电压 / 磁盘 / 主板），点击某一类在右侧查看该类全部指标，2 秒刷新，按厂商安全阈值自动配色（正常 / 警告 / 危险）
-- **CPU 细项**：封装温度、总负载、最高核心负载、平均频率、功耗，以及每个逻辑核心的负载与频率
+### 🌡️ 硬件健康监控与崩溃黑匣子（免 WinRing0 拦截）
+- **🛡️ 免 `WinRing0` 安全传感器桥接（`InpOutSensorBridge`）**：默认拦截 `WinRing0x64.sys` 释放，彻底杜绝 Windows Defender `VulnerableDriver:WinNT/Winring0` 报毒弹窗；通过安全桥接与 ACPI `MCFG` 物理内存映射直读 **AMD Ryzen SMU / PM Table** 与 **主板 SuperIO (`Nuvoton NCT679xD` / `ITE`)** 硬件寄存器
+- **实时看板**：左侧分类导航（CPU / GPU / 内存 / 电压 / 磁盘 / 主板），2 秒刷新；内置 **「🖥️ 标准台式机 / 💻 游戏本耐温 / ❄️ 水冷严格」三档告警阈值预设**，一键切换避免游戏本满载误报
+- **CPU 细项**：封装温度 (`Tctl/Tdie`)、总负载、最高核心负载、平均频率、封装功耗 (`PPT W`)，以及每个逻辑核心的实时负载与加速频率 (`MHz`)
 - **GPU 细项**：核心 / 热点 / 显存温度、显存占用、GPU 与显存控制器负载、核心 / 显存频率、功耗、风扇转速与百分比、核心电压
-- **内存细项**：物理 / 虚拟内存占用百分比与已用 / 总量（GB）
-- **主板与供电**：传感器最高温度、全部 SuperIO 风扇转速与占空比、+12V / +5V / +3.3V / +3V Standby / Vcore / CPU SoC 电压、CMOS 电池电压
-- **逐盘监控**：自动识别全部物理磁盘（NVMe / SATA / USB），按盘符 C → D → E → F 排序，列出温度、剩余寿命、NVMe 备用块余量、空间占用、读写速率与累计写入量
-- **崩溃回放**：环形缓冲持续保留最近 10 分钟传感器读数，崩溃时自动保存前 5 分钟 + 后 1 分钟窗口，在「硬件回放」页用曲线标注崩溃时刻
-- **多指标叠加**：同单位指标可叠加对比（温度 / 电压 / 负载 / 频率 / 功耗 / 风扇 / 内存 / 逐盘温度 / 寿命 / 备用块），并支持导出 CSV 数据表与 PNG 图表
-- **崩溃前异常分析**：自动识别 CPU / GPU / 显存 / 主板 / 逐盘过热、磁盘寿命不足、NVMe 备用块低于厂商阈值、内存占用过高、供电电压偏离、CMOS 电池电压偏低、CPU 降频、风扇停转等疑似硬件问题（结论仅供参考），回放页与 HTML 报告同步展示
-- **开机后台采样**：可一键注册计划任务，登录后自动在后台记录传感器读数（按小时滚动保存约 48 小时），蓝屏重启后仍能回放崩溃前窗口
-- 需管理员权限读取传感器；未提权时看板自动降级为占位提示
+- **主板与供电细项**：主板传感器温度 (`SYSTIN`)、全部 SuperIO 风扇转速与 PWM 占空比、+12V / +5V / +3.3V / +3V Standby / Vcore / CPU SoC 电压、CMOS 电池 (`CR2032`) 电压
+- **逐盘监控**：自动识别全部物理磁盘（NVMe / SATA / USB），按盘符 C → D → E → F 排序，展示温度、剩余寿命、NVMe 备用块余量、空间占用、读写速率与累计写入量
+- **崩溃黑匣子回放与异常诊断**：环形缓冲保留最近 10 分钟传感器读数（配合「开机后台采样」计划任务可跨蓝屏重启保留 48 小时），崩溃前异常分析自动识别过热、降频、掉压、风扇停转、备用块耗尽等隐患，并支持多指标叠加及导出 CSV / PNG
 
-### 历史趋势
-- 最近 30 天每日崩溃次数柱状图
-- 停止代码 / 嫌疑驱动分布统计
-- A/B 时段对比：换驱动、改 BIOS、关 XMP 前后效果一目了然
-
-### 报告导出
-导出 zip 报告包，方便发论坛求助或存档：
-- `report.html` —— 可视化排障报告（含环境快照、嫌疑驱动排行、逐条详情）
-- `events.json` —— 结构化事件数据 + 原始事件 XML
-- `environment.json` —— 硬件环境快照
-- `dumps/*.dmp` —— 崩溃 dump 原文件（超过 500MB 自动跳过）
+### 📦 现代交互式报告导出
+一键导出自包含 `.zip` 排障报告包，**自动提取并打包所有关联 `.dmp` 转储文件**：
+- `report.html` —— **现代化交互式排障报告**：
+  - 顶部 KPI 概览仪表盘（总崩溃数、蓝屏数、WHEA 硬件错误、头号嫌疑驱动、已打包 `.dmp` 数量与体积）
+  - 实时关键词搜索框 + 崩溃类型筛选胶囊 + **深色/浅色主题一键切换** + 打印/导出 PDF 样式优化
+  - **一键复制文本诊断摘要**按钮
+  - 每条崩溃卡片直接展示 **`dumps/xxx.dmp` 相对路径徽章与文件大小**，解压后可直接点击或用 WinDbg 分析
+- `dumps/*.dmp` —— 自动收集并按大小优先策略打包全部关联崩溃转储原文件（单文件上限 500MB，总预算 2GB）
+- `events.json` / `environment.json` / `environment_history.json` / `hardware_snapshots/*.json` —— 完整结构化诊断数据
 
 ## 🚀 快速开始
 
 ### 运行要求
 - Windows 10 / 11（x64）
-- **管理员权限**（读取 MEMORY.DMP 与系统事件日志必需，程序会自动请求 UAC 提权）
+- **管理员权限**（读取系统事件日志、内核转储与底层硬件传感器必需，程序启动会自动请求 UAC 提权）
 
 ### 下载安装
 从 [Releases](https://github.com/whitegivecraig/CrashSniffer/releases) 下载最新版 `CrashSniffer_v*_win-x64.zip`，解压后直接运行 `CrashSniffer.exe`。发布为自包含单文件，**无需安装 .NET 运行时**。
 
 ### 使用方法
 1. 以管理员身份运行 `CrashSniffer.exe`
-2. 选择时间范围（今天 / 近 7 天 / 近 30 天 / 本月 / 全部）
-3. 点击「🔄 刷新扫描」
-4. 在左侧列表选择崩溃事件，右侧查看停止代码、嫌疑驱动、排障建议与关联事件
-5. 点击「📦 导出报告包」生成 zip 报告
+2. 选择时间范围（今天 / 近 7 天 / 近 30 天 / 本月 / 全部），可使用列表上方搜索框或类型筛选框快速定位
+3. 在左侧列表选择崩溃事件，右侧查看停止代码、故障模块偏移、嫌疑驱动、事发前变更、排障建议与硬件回放曲线
+4. 点击「🔧 转储体检」检查系统蓝屏转储设置，或点击「📋 生成求诊帖」复制论坛求助格式
+5. 点击「📦 导出报告包」生成包含交互式 `report.html` 与 `dumps/*.dmp` 的完整压缩包
 
 ### 从源码构建
 
 ```bash
 git clone https://github.com/whitegivecraig/CrashSniffer.git
 cd CrashSniffer
+
+# 运行全部单元测试（185 项）
+dotnet test -c Release
+
+# 发布单文件独立可执行文件
 dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-contained
 ```
 
@@ -75,18 +73,30 @@ dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-con
 
 | 类型 | 数据来源 | 说明 |
 |------|----------|------|
-| 🟦 BSOD 蓝屏 | Minidump / Event 1001 | 停止代码 + 参数 + 嫌疑驱动 |
-| 🔥 WHEA 硬件错误 | WHEA-Logger | CPU / PCIe / 内存等硬件层错误 |
-| 🎮 GPU TDR | Display 4101~4105 | 显卡驱动超时重置 |
+| 🟦 BSOD 蓝屏 | Minidump / Event 1001 | 停止代码 + 四维参数 + 崩溃模块偏移 + 嫌疑驱动 |
+| 🔥 WHEA 硬件错误 | WHEA-Logger (17/18/19/46/47) | CPU / PCIe / 内存等硬件层错误精准部位识别 |
+| 🎮 GPU TDR | Display 4101~4105 / UMDF 10110 | 显卡驱动超时重置与用户态驱动宿主崩溃 |
 | ⚡ Kernel-Power 41 | 事件日志 | 异常重启（断电 / 蓝屏后自动重启） |
 | 🔌 意外关闭 6008 | 事件日志 | 未走正常关机流程 |
-| 🧩 LiveKernel | LiveKernelReports | 设备挂死但未蓝屏（如 0x141） |
+| 🧩 LiveKernel | LiveKernelReports | 设备挂死但未蓝屏（如 0x141 / 0x117 显卡超时） |
 
 ## 📄 第三方组件
 
 本项目基于 .NET 8 运行时，使用 System.Text.Json、System.Diagnostics.EventLog、System.Management（均为 MIT 许可）与 LibreHardwareMonitorLib（MPL-2.0），详见 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)。
 
 ## 📝 更新日志
+
+### v2.5.0
+- **新增**：**免 `WinRing0` 驱动的底层传感器直采桥接器 (`InpOutSensorBridge`)** —— 默认阻止释放 `WinRing0x64.sys`，彻底解决 Windows Defender 报毒拦截 `VulnerableDriver:WinNT/Winring0` 的问题；通过 ACPI `MCFG` 物理内存映射与 SuperIO 端口桥接直接采集 AMD Ryzen SMU / PM Table（CPU `Tctl/Tdie` 温度、`PPT` 功耗、16 线程实时加速频率、`Vcore`/`SoC` 电压）与主板 `NCT679xD`/`ITE` 传感器（主板温度、`+12V`/`+5V`/`+3.3V`/`3VSB`/`CMOS` 电压、风扇转速与占空比）
+- **新增**：**`PAGEDU64` (`_TRIAGE_DUMP64`) 64 位内核转储深度解析** —— 自动提取已加载模块表、异常记录 (`_EXCEPTION_RECORD64`) 与上下文 (`_CONTEXT.Rip`)，精确定位故障模块偏移量（如 `amdkmdag.sys+0x1D0FB0`）与精确崩溃时间戳
+- **新增**：**多转储文件全量保留与一键导出 `.dmp`** —— 聚合事件保留全部关联 `.dmp` 路径 (`AssociatedDumpPaths`)；导出 ZIP 报告包自动收集全部关联 `.dmp` 并按大小优先策略打包；新增「💾 导出 .dmp」与「📂 定位文件」快捷操作
+- **新增**：**现代交互式 `report.html` 排障报告** —— 全新设计 KPI 统计卡片、关键词实时搜索、事件类型筛选胶囊、深色/浅色主题切换、一键复制诊断摘要，以及崩溃卡片内的 `dumps/*.dmp` 联动徽章
+- **新增**：**🔧 系统转储配置体检与一键修复 (`CrashDumpConfigService`)** —— 自动检测注册表小内存转储、`AlwaysKeepMemoryDump`、分页文件与 `Minidump` 目录状态并支持一键修复
+- **新增**：**📋 论坛求诊帖一键生成器 (`ForumPostBuilder`)** —— 一键生成包含环境配置、崩溃摘要、模块偏移与关联转储清单的 Markdown 求诊帖
+- **新增**：**硬件告警阈值三档预设切换** —— 支持「标准台式机 / 游戏本耐温 / 水冷严格」三档温度阈值实时切换
+- **新增**：主界面崩溃列表**关键词实时搜索框**与**事件类型筛选下拉框**；新增 `DriverFrameworks-UserMode (10110/10111)` 采集与 `Event 1001` 十六进制蓝屏参数解析
+- **修复**：修复传感器调度中 `Ring0.IsOpen` 判空陷阱与无效零值未过滤导致的 `0.0 °C (正常)`、`0.0 W` 假读数问题，建立采集层、判定层、界面层三道异常值过滤防线
+- **测试**：新增 75 项单元测试，全套测试扩充至 **185 项** 100% 通过
 
 ### v2.4.1
 - **修复**：事件页左侧列表因分割条在窗口布局完成前设置而塌缩（仅约 128px），四个表头挤在一起

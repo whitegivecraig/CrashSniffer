@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.IO;
 using System.Linq;
+using System.Management;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using CrashSniffer.Models;
@@ -12,7 +15,8 @@ namespace CrashSniffer.Services;
 /// <summary>
 /// 硬件监控核心服务：后台线程以 2s 间隔轮询传感器，
 /// 维护 300 点环形缓冲（~10 分钟），崩溃时输出前后窗口快照。
-/// 实现 IDisposable，释放 Computer 与后台线程。
+/// 默认启用「安全无驱动模式」（拦截 LibreHardwareMonitor 释放 WinRing0x64.sys 内核驱动），
+/// 彻底避免触发 Windows Defender 的 VulnerableDriver:WinNT/Winring0 严重告警。
 /// </summary>
 public sealed class HardwareMonitorService : IDisposable
 {
@@ -28,7 +32,17 @@ public sealed class HardwareMonitorService : IDisposable
     /// <summary>崩溃后窗口（分钟）</summary>
     private const int AfterCrashMinutes = 1;
 
-    private readonly Computer _computer;
+    /// <summary>
+    /// 是否允许释放并加载 WinRing0 内核驱动（默认 false）。
+    /// Windows Defender 会将 LibreHardwareMonitor 内置的 WinRing0x64.sys 识别为
+    /// VulnerableDriver:WinNT/Winring0 (CVE-2020-14979) 并弹窗拦截。
+    /// 默认关闭时：通过反射占位阻止 WinRing0.sys 释放到磁盘，显卡(NVAPI/ADL)、磁盘(SMART/NVMe)、
+    /// 内存(Win32 API)、CPU 负载与基础频率/温度(WMI/性能计数器)仍全部正常采集。
+    /// </summary>
+    public static bool AllowWinRing0Driver { get; set; } = false;
+
+    private Computer _computer;
+    private readonly InpOutSensorBridge _inpOutBridge = new();
     private readonly RingBuffer<HardwareReading> _buffer = new(BufferCapacity);
     private readonly object _sensorLock = new();
     private readonly HashSet<string> _recordedCrashes = new();
@@ -37,6 +51,9 @@ public sealed class HardwareMonitorService : IDisposable
     private Thread? _pollThread;
     private volatile bool _running;
     private bool _disposed;
+    private int _wmiFallbackTick;
+    private double? _cachedWmiCpuClock;
+    private double? _cachedWmiCpuTemp;
 
     /// <summary>快照落盘完成后触发（参数为 EventId，可能在后台线程触发）</summary>
     public event Action<string>? SnapshotSaved;
@@ -56,16 +73,91 @@ public sealed class HardwareMonitorService : IDisposable
 
     public HardwareMonitorService()
     {
-        _computer = new Computer
+        _computer = CreateComputer();
+    }
+
+    private static Computer CreateComputer() => new()
+    {
+        IsCpuEnabled = true,
+        IsGpuEnabled = true,
+        // 未启用 WinRing0 时关闭 SuperIO 主板端口扫描，避免无效的 LPC/IO 端口探测
+        IsMotherboardEnabled = AllowWinRing0Driver,
+        IsStorageEnabled = true,
+        IsMemoryEnabled = true,
+        IsNetworkEnabled = false,
+        IsControllerEnabled = false,
+    };
+
+    /// <summary>
+    /// 通过反射在 LibreHardwareMonitor.Hardware.Ring0.Open() 执行前注入未打开的占位实例，
+    /// 阻止其向程序目录释放 CrashSniffer.sys (WinRing0x64.sys)，从而彻底避免 Windows Defender 报毒拦截。
+    /// </summary>
+    internal static void ConfigureRing0Guard(bool allowDriver)
+    {
+        try
         {
-            IsCpuEnabled = true,
-            IsGpuEnabled = true,
-            IsMotherboardEnabled = true,
-            IsStorageEnabled = true,
-            IsMemoryEnabled = true,
-            IsNetworkEnabled = false,
-            IsControllerEnabled = false,
-        };
+            CleanupResidualSysFile();
+
+            var asm = typeof(Computer).Assembly;
+            var ring0Type = asm.GetType("LibreHardwareMonitor.Hardware.Ring0");
+            var kdType = asm.GetType("LibreHardwareMonitor.Hardware.KernelDriver");
+            if (ring0Type == null || kdType == null) return;
+
+            var driverField = ring0Type.GetField("_driver", BindingFlags.NonPublic | BindingFlags.Static);
+            if (driverField == null) return;
+
+            if (!allowDriver)
+            {
+                // 构造一个未调用 Install/Open 的空壳 KernelDriver：
+                // Ring0.Open() 检测到 _driver != null 会直接 return，不会调用 Extract() 释放 .sys 文件，
+                // 同时 _driver.IsOpen 为 false，所有依赖 Ring0 的代码安全走降级分支。
+                var ctor = kdType.GetConstructor(
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance,
+                    binder: null,
+                    types: new[] { typeof(string), typeof(string) },
+                    modifiers: null);
+                if (ctor != null)
+                {
+                    object dummyDriver = ctor.Invoke(new object[] { "CrashSniffer_NoRing0", "WinRing0_1_2_0" });
+                    driverField.SetValue(null, dummyDriver);
+                }
+            }
+            else
+            {
+                // 用户显式开启 Ring0 时，若此前是空壳占位（IsOpen == false），清空以允许正常加载
+                object? current = driverField.GetValue(null);
+                if (current != null)
+                {
+                    var isOpenProp = kdType.GetProperty("IsOpen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    bool isOpen = isOpenProp?.GetValue(current) is true;
+                    if (!isOpen)
+                        driverField.SetValue(null, null);
+                }
+            }
+        }
+        catch
+        {
+            // 反射守卫异常不阻断主流程
+        }
+    }
+
+    /// <summary>清理之前版本可能遗留在程序目录下的 .sys 驱动文件</summary>
+    private static void CleanupResidualSysFile()
+    {
+        try
+        {
+            string? processPath = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(processPath))
+            {
+                string sysPath = Path.ChangeExtension(processPath, ".sys");
+                if (File.Exists(sysPath))
+                    File.Delete(sysPath);
+            }
+            string baseSys = Path.Combine(AppContext.BaseDirectory, "CrashSniffer.sys");
+            if (File.Exists(baseSys))
+                File.Delete(baseSys);
+        }
+        catch { }
     }
 
     /// <summary>启动监控（打开传感器 + 启动轮询线程）</summary>
@@ -74,7 +166,16 @@ public sealed class HardwareMonitorService : IDisposable
         if (_running || _disposed) return;
         try
         {
+            ConfigureRing0Guard(AllowWinRing0Driver);
             _computer.Open();
+            if (!AllowWinRing0Driver)
+            {
+                // 关键修复：LibreHardwareMonitor 的 Ring0.IsOpen 仅判断 _driver != null（不检查 _driver.IsOpen）。
+                // 在 _computer.Open() 内部完成 Ring0.Open() 短路（成功阻止 CrashSniffer.sys 释放）后，
+                // 必须立即将 _driver 置回 null，使 Ring0.IsOpen 返回 false，防止 Amd17Cpu 等模块在 Update() 时
+                // 误调未打开的驱动句柄并把 0.0°C / 0.0W 写入传感器。
+                ClearDummyRing0BeforeClose();
+            }
         }
         catch
         {
@@ -84,6 +185,49 @@ public sealed class HardwareMonitorService : IDisposable
         _running = true;
         _pollThread = new Thread(PollLoop) { IsBackground = true, Name = "HardwareMonitor" };
         _pollThread.Start();
+    }
+
+    /// <summary>动态切换是否启用底层 Ring0 驱动并重启传感器</summary>
+    public void RestartWithRing0Setting(bool allowRing0)
+    {
+        if (_disposed) return;
+        AllowWinRing0Driver = allowRing0;
+        Stop();
+        lock (_sensorLock)
+        {
+            try
+            {
+                if (!allowRing0)
+                    ClearDummyRing0BeforeClose();
+                _computer.Close();
+            }
+            catch { }
+
+            _computer = CreateComputer();
+        }
+        Start();
+    }
+
+    private static void ClearDummyRing0BeforeClose()
+    {
+        try
+        {
+            var asm = typeof(Computer).Assembly;
+            var ring0Type = asm.GetType("LibreHardwareMonitor.Hardware.Ring0");
+            var kdType = asm.GetType("LibreHardwareMonitor.Hardware.KernelDriver");
+            var driverField = ring0Type?.GetField("_driver", BindingFlags.NonPublic | BindingFlags.Static);
+            if (driverField == null || kdType == null) return;
+
+            object? current = driverField.GetValue(null);
+            if (current != null)
+            {
+                var isOpenProp = kdType.GetProperty("IsOpen", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                bool isOpen = isOpenProp?.GetValue(current) is true;
+                if (!isOpen)
+                    driverField.SetValue(null, null);
+            }
+        }
+        catch { }
     }
 
     /// <summary>停止监控</summary>
@@ -114,6 +258,9 @@ public sealed class HardwareMonitorService : IDisposable
         }
     }
 
+    /// <summary>供单元测试或单次即时探测调用</summary>
+    internal HardwareReading? CollectSingleReading() => CollectReading();
+
     /// <summary>采集一次硬件读数</summary>
     private HardwareReading? CollectReading()
     {
@@ -138,6 +285,19 @@ public sealed class HardwareMonitorService : IDisposable
         reading.CpuTemperature = cpuTemp.Primary ?? cpuTemp.Fallback;
         if (cpuClockCount > 0)
             reading.CpuClock = cpuClockSum / cpuClockCount;
+
+        // 通过安全 InpOut 桥接器直接采集 AMD SMU（温度/功耗/核心频率/SVI2电压）与主板 SuperIO（主板温度/电压/风扇转速）
+        if (!AllowWinRing0Driver || reading.CpuTemperature == null || reading.MoboMaxTemperature == null)
+        {
+            _inpOutBridge.SupplementReading(reading);
+        }
+
+        // 若仍缺少 CPU 频率或温度，使用 Windows 原生 WMI 兜底补充
+        if (reading.CpuClock == null || reading.CpuTemperature == null)
+        {
+            SupplementCpuViaWmiFallback(reading);
+        }
+
         reading.CpuCores.Sort((a, b) => a.Index.CompareTo(b.Index));
         if (reading.CpuMaxCoreLoad == null && reading.CpuCores.Count > 0)
         {
@@ -147,6 +307,60 @@ public sealed class HardwareMonitorService : IDisposable
         FinalizeFans(reading);
         FinalizeStorage(reading);
         return reading;
+    }
+
+    /// <summary>
+    /// 当未加载 WinRing0 驱动时，通过系统自带 WMI（无需任何第三方内核驱动）补充 CPU 实时频率与 ACPI 热区温度。
+    /// 每 3 次轮询（约 6s）刷新一次缓存以降低 WMI 开销。
+    /// </summary>
+    private void SupplementCpuViaWmiFallback(HardwareReading reading)
+    {
+        int tick = Interlocked.Increment(ref _wmiFallbackTick);
+        if (tick == 1 || tick % 3 == 0)
+        {
+            if (reading.CpuClock == null)
+            {
+                try
+                {
+                    using var searcher = new ManagementObjectSearcher("SELECT CurrentClockSpeed FROM Win32_Processor");
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        if (mo["CurrentClockSpeed"] != null &&
+                            double.TryParse(mo["CurrentClockSpeed"].ToString(), out double mhz) && mhz > 0)
+                        {
+                            _cachedWmiCpuClock = mhz;
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (reading.CpuTemperature == null)
+            {
+                try
+                {
+                    using var searcher = new ManagementObjectSearcher(@"root\WMI", "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
+                    double maxC = double.MinValue;
+                    foreach (ManagementObject mo in searcher.Get())
+                    {
+                        if (mo["CurrentTemperature"] != null &&
+                            double.TryParse(mo["CurrentTemperature"].ToString(), out double tenthsKelvin) && tenthsKelvin > 2732)
+                        {
+                            double c = (tenthsKelvin / 10.0) - 273.15;
+                            if (c is > 0 and < 125 && c > maxC)
+                                maxC = c;
+                        }
+                    }
+                    if (maxC > double.MinValue)
+                        _cachedWmiCpuTemp = maxC;
+                }
+                catch { }
+            }
+        }
+
+        reading.CpuClock ??= _cachedWmiCpuClock;
+        reading.CpuTemperature ??= _cachedWmiCpuTemp;
     }
 
     /// <summary>过滤未接测速的风扇插针，仅保留 CPU 风扇与转速大于 0 的风扇</summary>
@@ -222,27 +436,37 @@ public sealed class HardwareMonitorService : IDisposable
         switch (s.SensorType)
         {
             case SensorType.Temperature:
-                ExtractCpuTemperature(s, v, temp);
+                if (v is > 0.5 and < 150.0)
+                    ExtractCpuTemperature(s, v, temp);
                 break;
             case SensorType.Power when s.Name.Contains("Package", StringComparison.OrdinalIgnoreCase):
-                r.CpuPower = v;
+                if (v is > 0.1 and < 2000.0)
+                    r.CpuPower = v;
                 break;
             case SensorType.Clock when s.Name.Contains("Core", StringComparison.OrdinalIgnoreCase):
-                clockSum += v;
-                clockCount++;
-                if (s.Name.StartsWith("Core #", StringComparison.OrdinalIgnoreCase))
-                    GetOrAddCore(r, ParseTrailingIndex(s.Name)).Clock = v;
+                if (v is > 10.0 and < 20000.0)
+                {
+                    clockSum += v;
+                    clockCount++;
+                    if (s.Name.StartsWith("Core #", StringComparison.OrdinalIgnoreCase))
+                        GetOrAddCore(r, ParseTrailingIndex(s.Name)).Clock = v;
+                }
                 break;
             case SensorType.Load:
-                if (s.Name.Contains("Core Max", StringComparison.OrdinalIgnoreCase))
-                    r.CpuMaxCoreLoad = v;
-                else if (s.Name.StartsWith("CPU Core #", StringComparison.OrdinalIgnoreCase))
-                    GetOrAddCore(r, ParseTrailingIndex(s.Name)).Load = v;
-                else if (s.Name.Contains("Total", StringComparison.OrdinalIgnoreCase))
-                    r.CpuLoad = v;
+                if (v is >= 0.0 and <= 100.0)
+                {
+                    if (s.Name.Contains("Core Max", StringComparison.OrdinalIgnoreCase))
+                        r.CpuMaxCoreLoad = v;
+                    else if (s.Name.StartsWith("CPU Core #", StringComparison.OrdinalIgnoreCase))
+                        GetOrAddCore(r, ParseTrailingIndex(s.Name)).Load = v;
+                    else if (s.Name.Contains("Total", StringComparison.OrdinalIgnoreCase))
+                        r.CpuLoad = v;
+                }
                 break;
             case SensorType.Voltage:
             {
+                // 排除 Amd17Cpu 在 Ring0 未就绪时因 eax=0 计算出的 1.55V (1.55 - 0*0.00625) 假读数
+                if (v is <= 0.1 or >= 1.549) break;
                 string n = s.Name.ToLowerInvariant();
                 if (n.Contains("soc") && n.Contains("svi2"))
                     r.CpuSocVoltage = v;
@@ -264,6 +488,7 @@ public sealed class HardwareMonitorService : IDisposable
 
     private static void ExtractCpuTemperature(ISensor s, double v, CpuTempAccumulator temp)
     {
+        if (v is <= 0.5 or >= 150.0) return;
         string n = s.Name.ToLowerInvariant();
         if (n.Contains("ccd"))
             temp.Fallback = Max(temp.Fallback, v);
@@ -279,6 +504,7 @@ public sealed class HardwareMonitorService : IDisposable
         {
             case SensorType.Temperature:
             {
+                if (v is <= 0.5 or >= 150.0) break;
                 string n = s.Name.ToLowerInvariant();
                 if (n.Contains("hot") && (n.Contains("spot") || n.Contains("point")))
                     r.GpuHotspot = Max(r.GpuHotspot, v);
@@ -291,10 +517,12 @@ public sealed class HardwareMonitorService : IDisposable
                 break;
             }
             case SensorType.Power when r.GpuPower == null:
-                r.GpuPower = v;
+                if (v is > 0.1 and < 2000.0)
+                    r.GpuPower = v;
                 break;
             case SensorType.Clock:
             {
+                if (v is <= 0.0 or >= 20000.0) break;
                 string n = s.Name.ToLowerInvariant();
                 if (n.Contains("memory") && r.GpuMemoryClock == null)
                     r.GpuMemoryClock = v;
@@ -326,13 +554,16 @@ public sealed class HardwareMonitorService : IDisposable
                 break;
             }
             case SensorType.Fan when r.GpuFanRpm == null:
-                r.GpuFanRpm = v;
+                if (v is >= 0.0 and < 15000.0)
+                    r.GpuFanRpm = v;
                 break;
             case SensorType.Control when r.GpuFanPercent == null:
-                r.GpuFanPercent = v;
+                if (v is >= 0.0 and <= 100.0)
+                    r.GpuFanPercent = v;
                 break;
             case SensorType.Voltage when r.GpuVoltage == null:
-                r.GpuVoltage = v;
+                if (v is > 0.1 and < 5.0)
+                    r.GpuVoltage = v;
                 break;
         }
     }
@@ -342,10 +573,12 @@ public sealed class HardwareMonitorService : IDisposable
         switch (s.SensorType)
         {
             case SensorType.Temperature:
-                r.MoboMaxTemperature = Max(r.MoboMaxTemperature, v);
+                if (v is > 0.5 and < 130.0)
+                    r.MoboMaxTemperature = Max(r.MoboMaxTemperature, v);
                 break;
             case SensorType.Voltage:
             {
+                if (v is <= 0.1 or >= 25.0) break;
                 string n = s.Name.ToLowerInvariant();
                 if (n.Contains("vcore") || n.Contains("cpu core"))
                     r.CpuVoltage = v;
@@ -363,12 +596,14 @@ public sealed class HardwareMonitorService : IDisposable
             }
             case SensorType.Fan:
             {
+                if (v is <= 0.0 or >= 15000.0) break;
                 r.CpuFanRpm ??= v;
                 GetOrAddFan(r, s.Name).Rpm = v;
                 break;
             }
             case SensorType.Control when s.Name.StartsWith("Fan", StringComparison.OrdinalIgnoreCase):
-                GetOrAddFan(r, s.Name).Percent = v;
+                if (v is >= 0.0 and <= 100.0)
+                    GetOrAddFan(r, s.Name).Percent = v;
                 break;
         }
     }
@@ -430,7 +665,8 @@ public sealed class HardwareMonitorService : IDisposable
             switch (sensor.SensorType)
             {
                 case SensorType.Temperature:
-                    storage.Temperature = Max(storage.Temperature, v);
+                    if (v is > 0.5 and < 130.0)
+                        storage.Temperature = Max(storage.Temperature, v);
                     break;
                 case SensorType.Level:
                     if (n.Contains("percentage used"))
@@ -591,6 +827,12 @@ public sealed class HardwareMonitorService : IDisposable
         if (_disposed) return;
         _disposed = true;
         Stop();
-        try { _computer.Close(); } catch { }
+        try
+        {
+            _inpOutBridge.Dispose();
+            ClearDummyRing0BeforeClose();
+            _computer.Close();
+        }
+        catch { }
     }
 }

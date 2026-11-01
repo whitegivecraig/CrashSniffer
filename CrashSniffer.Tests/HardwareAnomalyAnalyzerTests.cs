@@ -7,6 +7,7 @@ using Xunit;
 
 namespace CrashSniffer.Tests;
 
+[Collection("HardwareThresholds")]
 public class HardwareAnomalyAnalyzerTests
 {
     private static readonly DateTime Crash = new(2026, 10, 28, 12, 0, 0);

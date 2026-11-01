@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using CrashSniffer.Models;
@@ -26,8 +27,6 @@ public static class LiveKernelReportCollector
 
         try
         {
-            // IgnoreInaccessible：某个子目录访问被拒时跳过该目录继续枚举，
-            // 而不是让整个枚举抛异常导致已收集的部分也一并丢弃
             var opts = new EnumerationOptions
             {
                 RecurseSubdirectories = true,
@@ -42,7 +41,7 @@ public static class LiveKernelReportCollector
                     if (!fi.Exists) continue;
                     if (fi.LastWriteTime < startTime || fi.LastWriteTime > endTime) continue;
 
-                    result.Add(BuildEvent(file, fi, root));
+                    result.Add(BuildEvent(file, fi));
                 }
                 catch
                 {
@@ -58,9 +57,8 @@ public static class LiveKernelReportCollector
         return result;
     }
 
-    private static CrashEvent BuildEvent(string file, FileInfo fi, string root)
+    private static CrashEvent BuildEvent(string file, FileInfo fi)
     {
-        // 尝试用 minidump 解析器提取 BugCheckCode（很多 LiveKernel dump 头里有 0x141/0x117 等）
         CrashEvent? parsed = null;
         try { parsed = MinidumpParser.ParseFile(file); }
         catch { parsed = null; }
@@ -70,25 +68,33 @@ public static class LiveKernelReportCollector
         ev.Time = fi.LastWriteTime;
         ev.DumpPath = file;
         ev.DumpSize = fi.Length;
+        ev.AddDumpPath(file);
 
-        // 子目录名（WATCHDOG / Wi-Fi 等）有诊断价值
+        // 子目录名（WATCHDOG / WHEA / Wi-Fi 等）有诊断价值
         string subDir = Path.GetFileName(Path.GetDirectoryName(file) ?? string.Empty);
         string where = string.IsNullOrEmpty(subDir) || subDir.Equals("LiveKernelReports", StringComparison.OrdinalIgnoreCase)
             ? string.Empty : $" [{subDir}]";
+        string offsetNote = !string.IsNullOrWhiteSpace(ev.FaultingModuleOffset)
+            ? $" · {ev.FaultingModuleOffset}" : string.Empty;
+        string sizeNote = fi.Length > 0 ? $" ({CrashEvent.FormatFileSize(fi.Length)})" : string.Empty;
 
         if (ev.BugCheckCode != 0)
-            ev.Summary = $"LiveKernel 挂死 dump{where} 0x{ev.BugCheckCode:X} {ev.StopCode}（未蓝屏）";
+            ev.Summary = $"LiveKernel 挂死{where} 0x{ev.BugCheckCode:X} {ev.StopCode}{offsetNote}{sizeNote}";
         else
-            ev.Summary = $"LiveKernel 挂死 dump{where}（未蓝屏，可用 WinDbg 打开分析）";
+            ev.Summary = $"LiveKernel 挂死{where}{offsetNote}{sizeNote}（未蓝屏，可用 WinDbg 打开分析）";
 
-        ev.Troubleshooting.Clear();
-        ev.Troubleshooting.AddRange(new[]
+        var generalTips = new[]
         {
-            "LiveKernelReport：设备（多为 GPU）挂死但系统没有蓝屏，单独留下 dump 记录",
-            "显卡类 (WATCHDOG 子目录)：DDU 重装显卡驱动；GPU 超频/显存超频先还原默认",
-            "供电不足也会触发：检查显卡电源线、电源额定功率与 12V 输出",
-            "建议用 WinDbg Preview 打开该 dump 执行 !analyze -v 看具体挂死原因",
-        });
+            "LiveKernelReport：设备（多为 GPU 或 PCIe/WHEA）异常挂死但系统未蓝屏，自动留下内核实时转储",
+            "显卡类 (WATCHDOG 子目录)：使用 DDU 彻底重装显卡驱动；GPU 超频/降压/显存超频先还原默认",
+            "供电或线材接触不良也会触发：检查显卡供电接口、DP/HDMI 线材与电源 +12V 稳定性",
+            "可用 WinDbg Preview 打开该 .dmp 文件执行 !analyze -v 查看完整调用栈",
+        };
+        foreach (var tip in generalTips)
+        {
+            if (!ev.Troubleshooting.Contains(tip))
+                ev.Troubleshooting.Add(tip);
+        }
 
         return ev;
     }

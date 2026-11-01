@@ -39,6 +39,11 @@ public static class HistoryStore
 
     public static string FilePath { get; } = Path.Combine(StorageDir, "history.json");
 
+    /// <summary>测试用路径覆盖（避免测试写 %ProgramData%）</summary>
+    internal static string? FilePathOverrideForTests { get; set; }
+
+    private static string ActualFilePath => FilePathOverrideForTests ?? FilePath;
+
     /// <summary>存档 IO 锁：后台任务并发 AppendAndSave（Load→改→Save）时避免互相覆盖丢更新</summary>
     private static readonly object IoLock = new();
 
@@ -55,8 +60,8 @@ public static class HistoryStore
     {
         try
         {
-            if (!File.Exists(FilePath)) return new List<HistoryRecord>();
-            string json = File.ReadAllText(FilePath, Encoding.UTF8);
+            if (!File.Exists(ActualFilePath)) return new List<HistoryRecord>();
+            string json = File.ReadAllText(ActualFilePath, Encoding.UTF8);
             var list = JsonSerializer.Deserialize<List<HistoryRecord>>(json, JsonOpts);
             return list ?? new List<HistoryRecord>();
         }
@@ -65,11 +70,11 @@ public static class HistoryStore
             // 损坏：备份原文件后重建
             try
             {
-                if (File.Exists(FilePath))
+                if (File.Exists(ActualFilePath))
                 {
-                    string bak = FilePath + ".bak";
+                    string bak = ActualFilePath + ".bak";
                     if (File.Exists(bak)) File.Delete(bak);
-                    File.Move(FilePath, bak);
+                    File.Move(ActualFilePath, bak);
                 }
             }
             catch { /* 备份失败也继续 */ }
@@ -120,14 +125,14 @@ public static class HistoryStore
 
     private static void Save(List<HistoryRecord> records)
     {
-        Directory.CreateDirectory(StorageDir);
+        Directory.CreateDirectory(Path.GetDirectoryName(ActualFilePath)!);
         string json = JsonSerializer.Serialize(records, JsonOpts);
 
         // 原子写入：先写临时文件再覆盖替换（overwrite 的 Move 内部走 MOVEFILE_REPLACE_EXISTING），
         // 消除原来 Delete 与 Move 之间进程被杀导致正式文件丢失的窗口
-        string tmp = FilePath + ".tmp";
+        string tmp = ActualFilePath + ".tmp";
         File.WriteAllText(tmp, json, Encoding.UTF8);
-        File.Move(tmp, FilePath, overwrite: true);
+        File.Move(tmp, ActualFilePath, overwrite: true);
     }
 
     private static HistoryRecord ToRecord(CrashEvent ev) => new()

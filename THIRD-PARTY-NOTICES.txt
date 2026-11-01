@@ -61,7 +61,7 @@ https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 https://github.com/dotnet/runtime/blob/main/LICENSE.TXT
 
 -----------------------------------------------------------------------
-4. System.Management (NuGet 包 v8.0.0)
+4. System.Management (NuGet 包 v9.0.0)
 -----------------------------------------------------------------------
 
 组件名称：System.Management

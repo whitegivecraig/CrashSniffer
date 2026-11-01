@@ -4,6 +4,7 @@ using Xunit;
 
 namespace CrashSniffer.Tests;
 
+[Collection("HardwareThresholds")]
 public class HardwareThresholdsTests
 {
     [Theory]

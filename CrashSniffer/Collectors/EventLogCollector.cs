@@ -277,37 +277,98 @@ public static class EventLogCollector
         return null;
     }
 
-    private static CrashEvent FromBugCheckEvent(DateTime t, XDocument? doc, string message)
+    internal static CrashEvent FromBugCheckEvent(DateTime t, XDocument? doc, string message)
     {
         uint code = TryGetHexUint(doc, "param1") ?? TryGetUint(doc, "param1");
+        ulong[] bugParams =
+        [
+            TryGetHexUlong(doc, "param2") ?? TryGetUlong(doc, "param2"),
+            TryGetHexUlong(doc, "param3") ?? TryGetUlong(doc, "param3"),
+            TryGetHexUlong(doc, "param4") ?? TryGetUlong(doc, "param4"),
+            TryGetHexUlong(doc, "param5") ?? TryGetUlong(doc, "param5"),
+        ];
+
+        // Windows 10/11 Event 1001 标准格式：
+        // param1 = "0x0000000a (0x0000000000000008, 0x0000000000000002, 0x0000000000000001, 0xfffff803892bf272)"
+        // param2 = "C:\WINDOWS\Minidump\090526-22109-01.dmp"
+        // param3 = "c0756627-6edb-4e65-86af-d6b87f3ae3b0"
+        string? rawParam1 = TryGetString(doc, "param1");
+        if (code == 0 && !string.IsNullOrWhiteSpace(rawParam1))
+        {
+            var hexMatches = System.Text.RegularExpressions.Regex.Matches(rawParam1, @"0[xX]([0-9a-fA-F]+)");
+            if (hexMatches.Count >= 1 &&
+                uint.TryParse(hexMatches[0].Groups[1].Value, System.Globalization.NumberStyles.HexNumber, null, out uint parsedCode))
+            {
+                code = parsedCode;
+            }
+            for (int i = 1; i < hexMatches.Count && i <= 4; i++)
+            {
+                if (ulong.TryParse(hexMatches[i].Groups[1].Value, System.Globalization.NumberStyles.HexNumber, null, out ulong pVal))
+                    bugParams[i - 1] = pVal;
+            }
+        }
+
         var ev = new CrashEvent
         {
             Time = t,
             Type = CrashType.BSOD,
             EventMessage = message,
             BugCheckCode = code,
-            BugCheckParams =
-            [
-                TryGetHexUlong(doc, "param2") ?? TryGetUlong(doc, "param2"),
-                TryGetHexUlong(doc, "param3") ?? TryGetUlong(doc, "param3"),
-                TryGetHexUlong(doc, "param4") ?? TryGetUlong(doc, "param4"),
-                TryGetHexUlong(doc, "param5") ?? TryGetUlong(doc, "param5"),
-            ],
+            BugCheckParams = bugParams,
         };
         var info = BugCheckKnowledge.Get(code);
         ev.StopCode = info.Name;
         ev.StopCodeChinese = info.Chinese;
         ev.Troubleshooting.AddRange(info.Suggestions);
 
-        // 一般 param6/7 有 dump 文件名
-        string? dumpName = TryGetString(doc, "param6") ?? TryGetString(doc, "param7");
-        if (!string.IsNullOrWhiteSpace(dumpName) && dumpName.EndsWith(".dmp", StringComparison.OrdinalIgnoreCase))
+        // 提取转储文件路径（Win10/11 在 param2，旧版在 param6/param7，或任意含 .dmp 的 Data 节点）
+        string? dumpName = null;
+        foreach (string key in new[] { "param2", "param6", "param7", "DumpFile" })
         {
-            ev.DumpPath = Path.IsPathRooted(dumpName) ? dumpName :
-                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), dumpName);
+            string? candidate = TryGetString(doc, key)?.Trim();
+            if (!string.IsNullOrWhiteSpace(candidate) && candidate.EndsWith(".dmp", StringComparison.OrdinalIgnoreCase))
+            {
+                dumpName = candidate;
+                break;
+            }
         }
 
-        ev.Summary = $"蓝屏记录 (Event 1001) 0x{code:X} {info.Name}";
+        if (!string.IsNullOrWhiteSpace(dumpName))
+        {
+            string expanded = Environment.ExpandEnvironmentVariables(dumpName);
+            ev.DumpPath = Path.IsPathRooted(expanded)
+                ? expanded
+                : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), expanded);
+            ev.AddDumpPath(ev.DumpPath);
+
+            // 若该 dump 文件在磁盘上存在，直接解析补充嫌疑驱动、指令偏移与文件大小
+            try
+            {
+                if (File.Exists(ev.DumpPath))
+                {
+                    var fi = new FileInfo(ev.DumpPath);
+                    ev.DumpSize = fi.Length;
+                    var parsedDump = MinidumpParser.ParseFile(ev.DumpPath);
+                    if (parsedDump != null)
+                    {
+                        if (!string.IsNullOrWhiteSpace(parsedDump.SuspectDriver))
+                            ev.SuspectDriver = parsedDump.SuspectDriver;
+                        if (!string.IsNullOrWhiteSpace(parsedDump.FaultingModuleOffset))
+                            ev.FaultingModuleOffset = parsedDump.FaultingModuleOffset;
+                        if (parsedDump.ExceptionAddress != 0)
+                            ev.ExceptionAddress = parsedDump.ExceptionAddress;
+                        if (parsedDump.ExceptionCode != 0)
+                            ev.ExceptionCode = parsedDump.ExceptionCode;
+                        if (!string.IsNullOrWhiteSpace(parsedDump.GpuVendor))
+                            ev.GpuVendor = parsedDump.GpuVendor;
+                    }
+                }
+            }
+            catch { /* 忽略关联 dump 解析异常 */ }
+        }
+
+        string offsetTag = !string.IsNullOrWhiteSpace(ev.FaultingModuleOffset) ? $" · {ev.FaultingModuleOffset}" : string.Empty;
+        ev.Summary = $"蓝屏记录 (Event 1001) 0x{code:X} {info.Name}{offsetTag}";
         return ev;
     }
 

@@ -47,42 +47,41 @@ public static class CrashAggregator
         all.AddRange(logs);
         all.AddRange(lives);
 
-        // 按时间升序做归并
-        all = all.OrderBy(e => e.Time).ToList();
-        var merged = new List<CrashEvent>();
+        var merged = AggregateEvents(all);
 
-        int i = 0;
-        while (i < all.Count)
+        // 兜底：若原始 dumps 或 lives 中有实际存在的 .dmp 文件因时间戳偏移未被归入对应事件，
+        // 按最近时间差（±45 分钟内）挂载到对应事件，确保导出时绝不漏掉任何一个 .dmp
+        var allKnownDumps = dumps.Concat(lives)
+            .SelectMany(d => d.GetEffectiveDumpPaths())
+            .Where(p => !string.IsNullOrWhiteSpace(p) && File.Exists(p))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (string dmpPath in allKnownDumps)
         {
-            CrashEvent primary = all[i];
-            DateTime windowStart = primary.Time;
-            DateTime windowEnd = primary.Time.AddMinutes(MERGE_WINDOW_MINUTES);
-            // 硬上限：窗口最多从首个事件延展 2 小时，防止链式延长把全部事件并成一组
-            DateTime windowHardCap = windowStart.Add(MERGE_WINDOW_HARD_CAP);
+            bool alreadyAttached = merged.Any(ev =>
+                ev.GetEffectiveDumpPaths().Any(p => string.Equals(p, dmpPath, StringComparison.OrdinalIgnoreCase)));
+            if (alreadyAttached) continue;
 
-            var group = new List<CrashEvent> { primary };
-            i++;
-            while (i < all.Count && all[i].Time <= windowEnd)
+            try
             {
-                group.Add(all[i]);
-                // 延展窗口尾 (BSOD+1001+41 可能跨越几十秒)，但不超过硬上限
-                DateTime candidate = all[i].Time.AddMinutes(MERGE_WINDOW_MINUTES);
-                if (candidate > windowEnd)
-                    windowEnd = candidate > windowHardCap ? windowHardCap : candidate;
-                i++;
+                DateTime ft = File.GetLastWriteTime(dmpPath);
+                var closest = merged
+                    .Select(ev => (ev, diff: Math.Abs((ev.Time - ft).TotalMinutes)))
+                    .Where(x => x.diff <= 45)
+                    .OrderBy(x => x.diff)
+                    .FirstOrDefault().ev;
+                if (closest != null)
+                {
+                    closest.AddDumpPath(dmpPath);
+                    if (string.IsNullOrWhiteSpace(closest.DumpPath) || !File.Exists(closest.DumpPath))
+                    {
+                        closest.DumpPath = dmpPath;
+                        try { closest.DumpSize = new FileInfo(dmpPath).Length; } catch { }
+                    }
+                }
             }
-
-            // 从组中取严重级别最高的作为主事件，其它作为补充信息合并进去
-            CrashEvent leader = group.OrderBy(e => (int)e.Type).First();
-
-            // 用 minidump 解析出来的信息优先：如果组里有 dump 解析结果，就拿 dump 当 leader
-            var dumpLeader = group.FirstOrDefault(e => e.Type == CrashType.BSOD && !string.IsNullOrEmpty(e.DumpPath));
-            if (dumpLeader != null && dumpLeader != leader) leader = dumpLeader;
-
-            // 合并其它成员的信息到 leader
-            MergeGroupInfo(leader, group);
-
-            merged.Add(leader);
+            catch { /* 忽略单个文件关联异常 */ }
         }
 
         // 附关联事件（±5分钟 System 日志）
@@ -114,6 +113,53 @@ public static class CrashAggregator
         // 按时间倒序返回（最近的排前面）
         merged.Sort((a, b) => DateTime.Compare(b.Time, a.Time));
         return (merged, dumpCount, eventLogCount, liveKernelCount);
+    }
+
+    /// <summary>
+    /// 对给定的原始崩溃事件列表进行时间窗口归并，返回按时间倒序排列的合并事件列表
+    /// </summary>
+    public static List<CrashEvent> AggregateEvents(IEnumerable<CrashEvent> rawEvents)
+    {
+        var all = rawEvents.OrderBy(e => e.Time).ToList();
+        var merged = new List<CrashEvent>();
+
+        int i = 0;
+        while (i < all.Count)
+        {
+            CrashEvent primary = all[i];
+            DateTime windowStart = primary.Time;
+            DateTime windowEnd = primary.Time.AddMinutes(MERGE_WINDOW_MINUTES);
+            // 硬上限：窗口最多从首个事件延展 2 小时，防止链式延长把全部事件并成一组
+            DateTime windowHardCap = windowStart.Add(MERGE_WINDOW_HARD_CAP);
+
+            var group = new List<CrashEvent> { primary };
+            i++;
+            while (i < all.Count && all[i].Time <= windowEnd)
+            {
+                group.Add(all[i]);
+                // 延展窗口尾 (BSOD+1001+41 可能跨越几十秒)，但不超过硬上限
+                DateTime candidate = all[i].Time.AddMinutes(MERGE_WINDOW_MINUTES);
+                if (candidate > windowEnd)
+                    windowEnd = candidate > windowHardCap ? windowHardCap : candidate;
+                i++;
+            }
+
+            // 从组中取严重级别最高的作为主事件，其它作为补充信息合并进去
+            CrashEvent leader = group.OrderBy(e => (int)e.Type).First();
+
+            // 用 minidump 解析出来的信息优先：优先选磁盘上实际存在 .dmp 文件的 BSOD 事件作为 leader
+            var dumpLeader = group.FirstOrDefault(e => e.Type == CrashType.BSOD && !string.IsNullOrEmpty(e.DumpPath) && File.Exists(e.DumpPath))
+                          ?? group.FirstOrDefault(e => e.Type == CrashType.BSOD && !string.IsNullOrEmpty(e.DumpPath));
+            if (dumpLeader != null && dumpLeader != leader) leader = dumpLeader;
+
+            // 合并其它成员的信息到 leader
+            MergeGroupInfo(leader, group);
+
+            merged.Add(leader);
+        }
+
+        merged.Sort((a, b) => DateTime.Compare(b.Time, a.Time));
+        return merged;
     }
 
     /// <summary>
@@ -171,6 +217,9 @@ public static class CrashAggregator
 
     private static void MergeGroupInfo(CrashEvent leader, List<CrashEvent> group)
     {
+        if (!string.IsNullOrWhiteSpace(leader.DumpPath))
+            leader.AddDumpPath(leader.DumpPath);
+
         foreach (var other in group)
         {
             if (ReferenceEquals(other, leader)) continue;
@@ -189,12 +238,38 @@ public static class CrashAggregator
                 }
             }
 
-            // dump 文件路径优先保留有解析的
+            // 汇总所有关联的 Dump 文件路径，不丢失任何一份转储
+            if (!string.IsNullOrWhiteSpace(other.DumpPath))
+                leader.AddDumpPath(other.DumpPath);
+            foreach (var p in other.AllDumpPaths)
+                leader.AddDumpPath(p);
+
+            // 主 DumpPath 优先保留实际存在的文件，若都存在或都不存在则保留非空的
             if (string.IsNullOrEmpty(leader.DumpPath) && !string.IsNullOrEmpty(other.DumpPath))
             {
                 leader.DumpPath = other.DumpPath;
                 leader.DumpSize = other.DumpSize;
             }
+            else if (!string.IsNullOrEmpty(other.DumpPath)
+                     && !File.Exists(leader.DumpPath)
+                     && File.Exists(other.DumpPath))
+            {
+                leader.DumpPath = other.DumpPath;
+                leader.DumpSize = other.DumpSize;
+            }
+            else if (leader.DumpSize <= 0 && other.DumpSize > 0
+                     && string.Equals(leader.DumpPath, other.DumpPath, StringComparison.OrdinalIgnoreCase))
+            {
+                leader.DumpSize = other.DumpSize;
+            }
+
+            // 合并调用栈模块偏移与异常上下文
+            if (string.IsNullOrEmpty(leader.FaultingModuleOffset) && !string.IsNullOrEmpty(other.FaultingModuleOffset))
+                leader.FaultingModuleOffset = other.FaultingModuleOffset;
+            if (leader.ExceptionAddress == 0 && other.ExceptionAddress != 0)
+                leader.ExceptionAddress = other.ExceptionAddress;
+            if (leader.ExceptionCode == 0 && other.ExceptionCode != 0)
+                leader.ExceptionCode = other.ExceptionCode;
 
             // 嫌疑驱动：优先保留带「描述」的长版本
             if (string.IsNullOrEmpty(leader.SuspectDriver) && !string.IsNullOrEmpty(other.SuspectDriver))
@@ -210,13 +285,15 @@ public static class CrashAggregator
             if (string.IsNullOrEmpty(leader.GpuVendor) && !string.IsNullOrEmpty(other.GpuVendor))
                 leader.GpuVendor = other.GpuVendor;
 
-            // WHEA 位置补充
+            // WHEA 位置与核心编号补充
             if (string.IsNullOrEmpty(leader.WheaErrorType) && !string.IsNullOrEmpty(other.WheaErrorType))
                 leader.WheaErrorType = other.WheaErrorType;
             if (string.IsNullOrEmpty(leader.WheaLocation) && !string.IsNullOrEmpty(other.WheaLocation))
                 leader.WheaLocation = other.WheaLocation;
             if (string.IsNullOrEmpty(leader.WheaHardwarePart) && !string.IsNullOrEmpty(other.WheaHardwarePart))
                 leader.WheaHardwarePart = other.WheaHardwarePart;
+            if (!leader.WheaApicId.HasValue && other.WheaApicId.HasValue)
+                leader.WheaApicId = other.WheaApicId;
 
             // 合并排障建议（去重）
             foreach (var sug in other.Troubleshooting)

@@ -12,7 +12,7 @@ namespace CrashSniffer.UI;
 /// <summary>
 /// "硬件健康"标签页：左侧类别导航（CPU / GPU / 内存 / 电压 / 磁盘 / 主板），
 /// 选中后在右侧查看该类别的详细读数；数据来自 HardwareMonitorService，2s 刷新。
-/// 未提权/传感器不可用时显示降级占位。
+/// 支持「标准台式机 / 游戏本耐温 / 水冷严格」三档告警阈值预设切换。
 /// </summary>
 public class HardwareHealthTab : UserControl
 {
@@ -120,14 +120,39 @@ public class HardwareHealthTab : UserControl
         AutoSize = true,
         Font = new Font("Microsoft YaHei UI", 9),
         ForeColor = Color.FromArgb(0x6b, 0x72, 0x80),
-        Margin = new Padding(16, 6, 0, 0),
+        Margin = new Padding(12, 6, 16, 0),
+    };
+
+    private readonly Label _lblPreset = new()
+    {
+        Text = "告警阈值预设：",
+        AutoSize = true,
+        Font = new Font("Microsoft YaHei UI", 9),
+        ForeColor = Color.FromArgb(0x1f, 0x29, 0x37),
+        Margin = new Padding(12, 6, 2, 0),
+    };
+
+    private readonly ComboBox _cmbPreset = new()
+    {
+        DropDownStyle = ComboBoxStyle.DropDownList,
+        Width = 270,
+        Font = new Font("Microsoft YaHei UI", 9),
+        Margin = new Padding(0, 2, 0, 0),
+    };
+
+    private readonly CheckBox _chkRing0 = new()
+    {
+        Text = "启用传统 WinRing0 驱动（默认关闭，已通过安全桥接直接采集 CPU/主板传感器）",
+        AutoSize = true,
+        Font = new Font("Microsoft YaHei UI", 9),
+        ForeColor = Color.FromArgb(0x47, 0x55, 0x69),
+        Margin = new Padding(12, 4, 0, 0),
     };
 
     private bool _samplerEnabled;
     private bool _updatingSampler;
 
     private static readonly Color CardBack = Color.White;
-    private static readonly Color CardBorder = Color.FromArgb(226, 232, 240);
     private static readonly Color TextDark = Color.FromArgb(0x1f, 0x29, 0x37);
     private static readonly Color TextGray = Color.FromArgb(0x6b, 0x72, 0x80);
     private static readonly Font NavNameFont = new("Microsoft YaHei UI", 10, FontStyle.Bold);
@@ -151,15 +176,53 @@ public class HardwareHealthTab : UserControl
 
         root.Controls.Add(_lblStatus, 0, 0);
 
+        _cmbPreset.Items.AddRange(new object[]
+        {
+            HardwareThresholds.PresetDisplayName(HardwareThresholdPreset.DesktopStandard),
+            HardwareThresholds.PresetDisplayName(HardwareThresholdPreset.LaptopHighTemp),
+            HardwareThresholds.PresetDisplayName(HardwareThresholdPreset.WaterCooledStrict),
+        });
+        _cmbPreset.SelectedIndex = (int)HardwareThresholds.CurrentPreset;
+        _cmbPreset.SelectedIndexChanged += (_, _) =>
+        {
+            if (_cmbPreset.SelectedIndex >= 0)
+            {
+                HardwareThresholds.CurrentPreset = (HardwareThresholdPreset)_cmbPreset.SelectedIndex;
+                RefreshReadings();
+            }
+        };
+
         var samplerRow = new FlowLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
-            WrapContents = false,
+            WrapContents = true,
             Margin = new Padding(0, 8, 0, 8),
+        };
+        _chkRing0.Checked = HardwareMonitorService.AllowWinRing0Driver;
+        _chkRing0.CheckedChanged += (_, _) =>
+        {
+            if (_chkRing0.Checked)
+            {
+                var res = MessageBox.Show(FindForm(),
+                    "启用底层 Ring0 驱动（WinRing0x64.sys）可额外读取主板 SuperIO 电压/风扇与部分 CPU 传感器，\n" +
+                    "但 Microsoft Defender 会将开源 WinRing0 驱动识别为「VulnerableDriver:WinNT/Winring0」并拦截。\n\n" +
+                    "若未在 Windows 安全中心将本目录加入排除项，建议保持关闭（安全无驱动模式）。\n\n是否仍要开启？",
+                    "启用 Ring0 驱动提示", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+                if (res != DialogResult.Yes)
+                {
+                    _chkRing0.Checked = false;
+                    return;
+                }
+            }
+            _service?.RestartWithRing0Setting(_chkRing0.Checked);
+            RefreshReadings();
         };
         samplerRow.Controls.Add(_chkSampler);
         samplerRow.Controls.Add(_lblSamplerInfo);
+        samplerRow.Controls.Add(_lblPreset);
+        samplerRow.Controls.Add(_cmbPreset);
+        samplerRow.Controls.Add(_chkRing0);
         root.Controls.Add(samplerRow, 0, 1);
 
         // —— 左：类别导航 ——
@@ -473,7 +536,7 @@ public class HardwareHealthTab : UserControl
         _detailTitle.Text = $"{icon} {CategoryNames[(int)_category]}";
         _detailHint.Text = _category == HealthCategory.Disk
             ? "全部物理磁盘的实时状态，逐行按温度 / 寿命 / 备用块着色"
-            : "实时读数 · 每 2 秒刷新 · 按厂商安全阈值着色";
+            : "实时读数 · 每 2 秒刷新 · 按当前所选阈值预设着色";
 
         _detailGrid.Rows.Clear();
         if (_category != HealthCategory.Disk)
@@ -640,14 +703,14 @@ public class HardwareHealthTab : UserControl
     private static MetricCell PlainCell(string value)
         => new(value, "—", HardwareHealth.Unknown, Colorize: false);
 
-    private static string Temp(double? v) => v.HasValue ? $"{v.Value:F1} ℃" : "—";
-    private static string Pct(double? v) => v.HasValue ? $"{v.Value:F0}%" : "—";
-    private static string Watts(double? v) => v.HasValue ? $"{v.Value:F1} W" : "—";
-    private static string Mhz(double? v) => v.HasValue ? $"{v.Value:F0} MHz" : "—";
-    private static string Rpm(double? v) => v.HasValue ? $"{v.Value:F0} RPM" : "—";
+    private static string Temp(double? v) => v is > 0.5 and < 150.0 ? $"{v.Value:F1} ℃" : "—";
+    private static string Pct(double? v) => v is >= 0 and <= 100.0 ? $"{v.Value:F0}%" : "—";
+    private static string Watts(double? v) => v is > 0.1 and < 2000.0 ? $"{v.Value:F1} W" : "—";
+    private static string Mhz(double? v) => v is > 10.0 ? $"{v.Value:F0} MHz" : "—";
+    private static string Rpm(double? v) => v is > 0 and < 15000.0 ? $"{v.Value:F0} RPM" : "—";
 
     private static string Volts(double? v, int decimals)
-        => v.HasValue ? v.Value.ToString($"F{decimals}") + " V" : "—";
+        => v is > 0.1 and < 25.0 ? v.Value.ToString($"F{decimals}") + " V" : "—";
 
     private static string GbPair(double? used, double? total)
     {
@@ -659,16 +722,16 @@ public class HardwareHealthTab : UserControl
     private static string CoreText(CpuCoreReading core)
     {
         var parts = new List<string>();
-        if (core.Load.HasValue) parts.Add($"负载 {core.Load.Value:F0}%");
-        if (core.Clock.HasValue) parts.Add($"{core.Clock.Value:F0} MHz");
+        if (core.Load is >= 0) parts.Add($"负载 {core.Load.Value:F0}%");
+        if (core.Clock is > 10.0) parts.Add($"{core.Clock.Value:F0} MHz");
         return parts.Count > 0 ? string.Join(" · ", parts) : "—";
     }
 
     private static string FanText(FanReading fan)
     {
         var parts = new List<string>();
-        if (fan.Rpm.HasValue) parts.Add($"{fan.Rpm.Value:F0} RPM");
-        if (fan.Percent.HasValue) parts.Add($"{fan.Percent.Value:F0}%");
+        if (fan.Rpm is > 0 and < 15000.0) parts.Add($"{fan.Rpm.Value:F0} RPM");
+        if (fan.Percent is >= 0 and <= 100.0) parts.Add($"{fan.Percent.Value:F0}%");
         return parts.Count > 0 ? string.Join(" · ", parts) : "—";
     }
 

@@ -11,7 +11,7 @@ using CrashSniffer.Services;
 namespace CrashSniffer.UI;
 
 /// <summary>
-/// CrashSniffer 主窗体：顶部时间范围工具栏 + 左列表 + 右详情 Tab + 底部状态栏
+/// CrashSniffer 主窗体：顶部时间范围工具栏 + 左列表(带实时搜索筛选) + 右详情 Tab + 底部状态栏
 /// </summary>
 public class MainForm : Form
 {
@@ -29,6 +29,13 @@ public class MainForm : Form
     private readonly ToolStripSeparator _sep1 = new();
     private readonly ToolStripButton _btnRefresh = new("🔄 刷新扫描") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false, Font = new Font("Microsoft YaHei UI", 9, FontStyle.Bold) };
     private readonly ToolStripButton _btnExport = new("📦 导出报告包") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false, Font = new Font("Microsoft YaHei UI", 9, FontStyle.Bold) };
+    private readonly ToolStripButton _btnExportDump = new("💾 导出转储(.dmp)") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false };
+    private readonly ToolStripButton _btnCopyPost = new("📋 复制求助帖") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false };
+    private readonly ToolStripDropDownButton _btnToolbox = new("🛠️ 排障工具箱") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false };
+
+    // 左侧列表顶部实时搜索与类型过滤栏
+    private readonly ComboBox _cmbTypeFilter = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 140, Font = new Font("Microsoft YaHei UI", 9) };
+    private readonly TextBox _txtSearch = new() { PlaceholderText = "🔍 搜索停止代码、驱动、偏移...", Font = new Font("Microsoft YaHei UI", 9), Dock = DockStyle.Fill };
 
     private const int SplitterPreferred = 520;
     private readonly SplitContainer _split = new() { Orientation = Orientation.Vertical, Dock = DockStyle.Fill, FixedPanel = FixedPanel.Panel1 };
@@ -118,16 +125,18 @@ public class MainForm : Form
         // ToolStrip
         _dtpStart = new ToolStripDateTimePicker
         {
-            Width = 160,
+            Width = 155,
             Format = DateTimePickerFormat.Custom,
             CustomFormat = "yyyy-MM-dd HH:mm"
         };
         _dtpEnd = new ToolStripDateTimePicker
         {
-            Width = 160,
+            Width = 155,
             Format = DateTimePickerFormat.Custom,
             CustomFormat = "yyyy-MM-dd HH:mm"
         };
+
+        BuildToolboxMenu();
 
         _topToolStrip.GripStyle = ToolStripGripStyle.Hidden;
         _topToolStrip.Stretch = true;
@@ -137,15 +146,51 @@ public class MainForm : Form
             _lblStart, _dtpStart, _lblEnd, _dtpEnd,
             new ToolStripSeparator(),
             _btnToday, _btn7d, _btn30d, _btnMonth, _btnAll,
-            _sep1, _btnRefresh, new ToolStripSeparator(), _btnExport,
+            _sep1, _btnRefresh,
+            new ToolStripSeparator(),
+            _btnExport, _btnExportDump, _btnCopyPost,
+            new ToolStripSeparator(),
+            _btnToolbox,
         });
         _btnExport.Enabled = false;
+        _btnExportDump.Enabled = false;
+        _btnCopyPost.Enabled = false;
 
         // 快速按钮颜色
         foreach (var b in new[] { _btnToday, _btn7d, _btn30d, _btnMonth, _btnAll })
             b.ForeColor = Color.FromArgb(0x1d, 0x4e, 0xd9);
         _btnRefresh.ForeColor = Color.FromArgb(0x04, 0x78, 0x57);
         _btnExport.ForeColor = Color.FromArgb(0x83, 0x18, 0xb4);
+        _btnExportDump.ForeColor = Color.FromArgb(0x0e, 0x74, 0x90);
+        _btnCopyPost.ForeColor = Color.FromArgb(0x1e, 0x3a, 0x8a);
+        _btnToolbox.ForeColor = Color.FromArgb(0xb4, 0x53, 0x09);
+
+        // 左侧筛选搜索条
+        _cmbTypeFilter.Items.AddRange(new object[]
+        {
+            "全部类型",
+            "🟦 BSOD 蓝屏",
+            "🔥 WHEA 硬件错误",
+            "🎮 GPU TDR",
+            "⚡ Power-41",
+            "🔌 关机6008",
+            "🧩 LiveKernel挂死",
+        });
+        _cmbTypeFilter.SelectedIndex = 0;
+
+        var filterBar = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            Height = 34,
+            ColumnCount = 2,
+            RowCount = 1,
+            Padding = new Padding(4, 4, 4, 2),
+            BackColor = Color.FromArgb(241, 245, 249),
+        };
+        filterBar.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        filterBar.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        filterBar.Controls.Add(_cmbTypeFilter, 0, 0);
+        filterBar.Controls.Add(_txtSearch, 1, 0);
 
         // DataGrid 列：按比例铺满左侧面板，避免窄面板下后面的列被裁掉
         _grid.Columns.Add(new DataGridViewTextBoxColumn
@@ -178,7 +223,7 @@ public class MainForm : Form
         _grid.Columns.Add(new DataGridViewTextBoxColumn
         {
             Name = "ColDriver",
-            HeaderText = "嫌疑驱动",
+            HeaderText = "嫌疑驱动 / 偏移",
             AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill,
             FillWeight = 25,
             MinimumWidth = 120,
@@ -204,6 +249,7 @@ public class MainForm : Form
 
         // 组装容器：根 Tab = 崩溃事件页 + 历史趋势页
         _split.Panel1.Controls.Add(_grid);
+        _split.Panel1.Controls.Add(filterBar);
         _split.Panel2.Controls.Add(_tabs);
         _tabEvents.Controls.Add(_split);
         _tabHistory.Controls.Add(_historyTab);
@@ -230,6 +276,137 @@ public class MainForm : Form
         Controls.Add(_status);
 
         _status.Items.AddRange(new ToolStripItem[] { _lblStatus, _lblCount, _lblDump, _lblLog });
+    }
+
+    private void BuildToolboxMenu()
+    {
+        var miDumpCheck = new ToolStripMenuItem("🩺 系统转储设置体检与一键开启 Minidump");
+        miDumpCheck.Click += (_, _) => ShowDumpConfigDialog();
+
+        var miOpenMinidump = new ToolStripMenuItem("📂 打开系统 Minidump 目录");
+        miOpenMinidump.Click += (_, _) => OpenFolderSafe(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "Minidump"));
+
+        var miOpenLiveKernel = new ToolStripMenuItem("📂 打开 LiveKernelReports 目录");
+        miOpenLiveKernel.Click += (_, _) => OpenFolderSafe(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "LiveKernelReports"));
+
+        var miSfc = new ToolStripMenuItem("🔍 运行 SFC 系统文件修复 (sfc /scannow)");
+        miSfc.Click += (_, _) => RunAdminCmdTool("SFC 系统文件完整性扫描与修复", "sfc /scannow");
+
+        var miDism = new ToolStripMenuItem("🩹 运行 DISM 系统映像修复 (RestoreHealth)");
+        miDism.Click += (_, _) => RunAdminCmdTool("DISM 系统映像组件修复", "DISM /Online /Cleanup-Image /RestoreHealth");
+
+        var miMdsched = new ToolStripMenuItem("🧠 启动 Windows 内存诊断工具 (mdsched.exe)");
+        miMdsched.Click += (_, _) => StartSystemTool("mdsched.exe");
+
+        var miVerifierReset = new ToolStripMenuItem("🛡️ 重置驱动验证器 (verifier /reset)");
+        miVerifierReset.Click += (_, _) => RunAdminCmdTool("重置 Windows 驱动验证器", "verifier /reset");
+
+        var miDxdiag = new ToolStripMenuItem("🎮 打开 DirectX 诊断工具 (dxdiag.exe)");
+        miDxdiag.Click += (_, _) => StartSystemTool("dxdiag.exe");
+
+        _btnToolbox.DropDownItems.AddRange(new ToolStripItem[]
+        {
+            miDumpCheck,
+            new ToolStripSeparator(),
+            miOpenMinidump,
+            miOpenLiveKernel,
+            new ToolStripSeparator(),
+            miSfc,
+            miDism,
+            miMdsched,
+            miVerifierReset,
+            miDxdiag,
+        });
+    }
+
+    private void ShowDumpConfigDialog()
+    {
+        var report = CrashDumpConfigService.Inspect();
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"当前状态：{(report.IsOptimal ? "✅ 配置健康，下次蓝屏可正常保留转储文件" : $"⚠️ 发现 {report.Issues.Count} 项潜在风险")}");
+        sb.AppendLine("──────────────────────────────────────");
+        sb.AppendLine($"• 转储模式：{report.DumpModeName}");
+        sb.AppendLine($"• 小转储目录：{report.MinidumpDir} {(report.MinidumpDirExists ? "[已存在]" : "[尚未创建]")}");
+        sb.AppendLine($"• 完整转储路径：{report.DumpFile}");
+        sb.AppendLine($"• 写入系统日志 (LogEvent)：{(report.LogEventEnabled ? "已开启" : "未开启")}");
+        sb.AppendLine($"• 保留旧转储 (AlwaysKeepMemoryDump)：{(report.AlwaysKeepMemoryDump ? "已开启" : "未开启")}");
+        sb.AppendLine($"• 系统页面文件 (Pagefile)：{(report.HasActivePageFile ? "正常" : "⚠️ 未检测到活动页面文件")}");
+
+        if (report.Issues.Count > 0)
+        {
+            sb.AppendLine();
+            sb.AppendLine("⚠️ 发现以下潜在问题：");
+            foreach (var w in report.Issues)
+                sb.AppendLine($"  - {w}");
+        }
+
+        sb.AppendLine();
+        sb.AppendLine("是否立即一键应用推荐的「小内存转储 (256KB) + 自动保留 + 写入日志」最佳排障配置？");
+
+        var res = MessageBox.Show(this, sb.ToString(), "系统崩溃转储 (Minidump) 体检",
+            MessageBoxButtons.YesNo, report.IsOptimal ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
+
+        if (res == DialogResult.Yes)
+        {
+            if (CrashDumpConfigService.ApplyOptimalConfig(setSmallDumpMode: true, out string msg))
+                MessageBox.Show(this, msg, "配置已生效", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            else
+                MessageBox.Show(this, msg, "配置失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void OpenFolderSafe(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir))
+            {
+                MessageBox.Show(this, $"目录尚不存在：\n{dir}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            System.Diagnostics.Process.Start("explorer.exe", $"\"{dir}\"");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"无法打开目录：\n{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void RunAdminCmdTool(string title, string command)
+    {
+        var res = MessageBox.Show(this, $"即将打开命令行窗口执行系统维护命令：\n\n{command}\n\n是否继续？",
+            title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (res != DialogResult.Yes) return;
+        try
+        {
+            var psi = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = "cmd.exe",
+                Arguments = $"/k {command}",
+                UseShellExecute = true,
+            };
+            System.Diagnostics.Process.Start(psi);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"启动工具失败：\n{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void StartSystemTool(string exeName)
+    {
+        try
+        {
+            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exeName,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"无法启动 {exeName}：\n{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     protected override void OnLoad(EventArgs e)
@@ -265,6 +442,11 @@ public class MainForm : Form
         _btnAll.Click += (_, _) => { SetQuickRange(TimePreset.All); RefreshScan(); };
         _btnRefresh.Click += (_, _) => RefreshScan();
         _btnExport.Click += (_, _) => DoExport();
+        _btnExportDump.Click += (_, _) => DoExportSelectedEventDumps();
+        _btnCopyPost.Click += (_, _) => CopySelectedForumPost();
+
+        _cmbTypeFilter.SelectedIndexChanged += (_, _) => LoadGrid();
+        _txtSearch.TextChanged += (_, _) => LoadGrid();
 
         _dtpStart.ValueChanged += (_, _) => { if (!_suppressRangeEvents) RefreshScan(); };
         _dtpEnd.ValueChanged += (_, _) => { if (!_suppressRangeEvents) RefreshScan(); };
@@ -302,8 +484,6 @@ public class MainForm : Form
                 break;
             case TimePreset.All:
             default:
-                // DateTime.MinValue(0001年) 低于 DateTimePicker.MinDate(1753年) 会抛
-                // ArgumentOutOfRangeException，这里用控件自身的边界值
                 start = DateTimePicker.MinimumDateTime;
                 end = DateTimePicker.MaximumDateTime;
                 break;
@@ -353,14 +533,14 @@ public class MainForm : Form
 
             LoadGrid();
             _btnExport.Enabled = _events.Count > 0;
+            _btnExportDump.Enabled = _events.Count > 0;
+            _btnCopyPost.Enabled = _events.Count > 0;
             _lblCount.Text = $"崩溃事件: {_events.Count}";
-            _lblDump.Text = $"Dumps: {_dumpCount}";
+            _lblDump.Text = $"Dumps: {_dumpCount + _liveCount}";
             _lblLog.Text = $"事件: {_logCount}";
             SetBusy(false, $"扫描完成，共 {_events.Count} 条崩溃事件 (Minidump {_dumpCount} / 事件 {_logCount} / LiveKernel {_liveCount})");
 
             // 后台：写入历史存档 + 采集环境快照（均不阻塞 UI）
-            // 注意：这两个是 fire-and-forget 任务，可能比本次扫描活得久，
-            // 存档类的并发安全由各 Store 内部的 IO 锁保证
             _ = Task.Run(() =>
             {
                 try { HistoryStore.AppendAndSave(_events); } catch { /* 历史失败不影响主流程 */ }
@@ -398,8 +578,6 @@ public class MainForm : Form
         catch (Exception ex)
         {
             SetBusy(false, "扫描失败");
-            // Task.WaitAll 会把采集层抛出的具体异常（如"需要管理员权限"）包成 AggregateException，
-            // 取根因异常展示，避免用户只看到 "One or more errors occurred."
             MessageBox.Show(this, $"扫描过程出错：\n{ex.GetBaseException().Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         finally
@@ -414,15 +592,55 @@ public class MainForm : Form
         else _lblStatus.Text = text;
     }
 
+    private List<CrashEvent> GetFilteredEvents()
+    {
+        IEnumerable<CrashEvent> query = _events;
+
+        int typeIdx = _cmbTypeFilter.SelectedIndex;
+        if (typeIdx > 0)
+        {
+            CrashType targetType = typeIdx switch
+            {
+                1 => CrashType.BSOD,
+                2 => CrashType.WHEA_Error,
+                3 => CrashType.GPU_TDR,
+                4 => CrashType.KernelPower_41,
+                5 => CrashType.Shutdown_6008,
+                6 => CrashType.LiveKernel,
+                _ => CrashType.BSOD,
+            };
+            query = query.Where(e => e.Type == targetType);
+        }
+
+        string kw = _txtSearch.Text.Trim();
+        if (!string.IsNullOrEmpty(kw))
+        {
+            query = query.Where(e =>
+                (e.Summary?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.StopCode?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.StopCodeChinese?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.SuspectDriver?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.FaultingModuleOffset?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.WheaErrorType?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.WheaLocation?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.WheaHardwarePart?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                (e.DumpPath?.Contains(kw, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                $"0x{e.BugCheckCode:X}".Contains(kw, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return query.ToList();
+    }
+
     private void LoadGrid()
     {
-        // 重新扫描后尽量保留原选中项，避免详情区跳回第一条
+        // 重新扫描或过滤后尽量保留原选中项，避免详情区跳回第一条
         CrashEvent? previous = _grid.SelectedRows.Count > 0 && _grid.SelectedRows[0].Tag is CrashEvent prev
             ? prev
             : null;
 
+        var filtered = GetFilteredEvents();
         _grid.Rows.Clear();
-        foreach (var ev in _events)
+        foreach (var ev in filtered)
         {
             int idx = _grid.Rows.Add();
             var row = _grid.Rows[idx];
@@ -433,16 +651,17 @@ public class MainForm : Form
             row.DefaultCellStyle.SelectionBackColor = ColorForType(ev.Type);
             row.Cells[1].Style.ForeColor = ColorForType(ev.Type);
             row.Cells[2].Value = ev.BugCheckCode > 0 ? $"0x{ev.BugCheckCode:X} {ev.StopCode}" : "-";
-            row.Cells[3].Value = string.IsNullOrWhiteSpace(ev.SuspectDriver) ? "-" : Truncate(StripBracket(ev.SuspectDriver), 22);
+            string drvOrOffset = !string.IsNullOrWhiteSpace(ev.FaultingModuleOffset)
+                ? ev.FaultingModuleOffset
+                : (string.IsNullOrWhiteSpace(ev.SuspectDriver) ? "-" : StripBracket(ev.SuspectDriver));
+            row.Cells[3].Value = Truncate(drvOrOffset, 24);
             row.Tag = ev;
         }
 
-        int selectIndex = previous == null ? 0 : _events.FindIndex(e =>
+        int selectIndex = previous == null ? 0 : filtered.FindIndex(e =>
             e.Time == previous.Time && e.Type == previous.Type && e.BugCheckCode == previous.BugCheckCode);
         if (selectIndex < 0) selectIndex = 0;
 
-        // 第一行在 Rows.Add 时就会被自动选中并触发 SelectionChanged，
-        // 但那一刻 Tag 尚未赋值，详情会被清空；这里显式选中并刷新详情。
         _grid.ClearSelection();
         if (_grid.Rows.Count > 0)
         {
@@ -468,7 +687,7 @@ public class MainForm : Form
         AppendLine(b, $"■ 摘要        {ev.Summary}", Color.FromArgb(0x1f, 0x29, 0x37));
         if (ev.BugCheckCode != 0)
         {
-            AppendLine(b, $"", Color.Black);
+            AppendLine(b, "", Color.Black);
             AppendLine(b, $"停止代码     0x{ev.BugCheckCode:X8}", Color.FromArgb(0x7c, 0x2d, 0x14), bold: true);
             AppendLine(b, $"符号名       {ev.StopCode}", Color.Black);
             AppendLine(b, $"解释         {ev.StopCodeChinese}", Color.Black);
@@ -477,14 +696,30 @@ public class MainForm : Form
             for (int i = 0; i < ev.BugCheckParams.Length; i++)
                 AppendLine(b, $"  P{i}  =  0x{ev.BugCheckParams[i]:X16}", Color.Black);
         }
-        if (!string.IsNullOrWhiteSpace(ev.DumpPath))
+
+        var dumps = ReportExporter.ResolveAllDumpPathsForEvent(ev);
+        if (dumps.Count > 0)
         {
             AppendLine(b, "", Color.Black);
-            AppendLine(b, "Dump 文件：", Color.FromArgb(0x1e, 0x3a, 0x8a), bold: true);
-            AppendLine(b, $"  {ev.DumpPath}", Color.Black);
-            if (ev.DumpSize > 0)
-                AppendLine(b, $"  大小        {ev.DumpSize / 1024 / 1024} MB", Color.Black);
+            AppendLine(b, $"关联转储文件 ({dumps.Count} 份)：", Color.FromArgb(0x1e, 0x3a, 0x8a), bold: true);
+            foreach (string dp in dumps)
+            {
+                bool exists = File.Exists(dp);
+                long sz = exists ? new FileInfo(dp).Length : ev.DumpSize;
+                string sizeStr = sz > 0 ? $" ({CrashEvent.FormatFileSize(sz)})" : "";
+                string statusStr = exists ? "✅ 在盘可导出" : "⚠️ 原文件已被清理";
+                AppendLine(b, $"  {dp}{sizeStr} [{statusStr}]", exists ? Color.Black : Color.FromArgb(0xb4, 0x53, 0x09));
+            }
         }
+
+        if (!string.IsNullOrWhiteSpace(ev.FaultingModuleOffset))
+        {
+            AppendLine(b, "", Color.Black);
+            AppendLine(b, "崩溃指令偏移：", Color.FromArgb(0x9f, 0x12, 0x3a), bold: true);
+            string addrStr = ev.ExceptionAddress != 0 ? $" (0x{ev.ExceptionAddress:X16})" : string.Empty;
+            AppendLine(b, $"  {ev.FaultingModuleOffset}{addrStr}", Color.FromArgb(0xdc, 0x26, 0x26), bold: true);
+        }
+
         if (!string.IsNullOrWhiteSpace(ev.SuspectDriver))
         {
             AppendLine(b, "", Color.Black);
@@ -501,12 +736,14 @@ public class MainForm : Form
             hasWhea = true;
             AppendLine(w, $"WHEA 错误类型：{ev.WheaErrorType}", Color.FromArgb(0xc2, 0x41, 0x0c), bold: true);
             AppendLine(w, $"出错位置：{ev.WheaLocation}", Color.Black);
+            if (ev.WheaApicId.HasValue)
+                AppendLine(w, $"核心定位：APIC ID = {ev.WheaApicId.Value}（逻辑核 #{ev.WheaApicId.Value} / 约物理核 #{ev.WheaApicId.Value / 2}）", Color.FromArgb(0x1d, 0x4e, 0xd9), bold: true);
             if (!string.IsNullOrWhiteSpace(ev.WheaHardwarePart))
                 AppendLine(w, $"出错部位：→ {ev.WheaHardwarePart}", Color.FromArgb(0x9f, 0x12, 0x3a), bold: true);
         }
         if (!string.IsNullOrWhiteSpace(ev.GpuVendor))
         {
-            AppendLine(w, $"", Color.Black);
+            AppendLine(w, "", Color.Black);
             AppendLine(w, $"GPU 厂商：{ev.GpuVendor}", Color.FromArgb(0x6d, 0x28, 0xd9), bold: true);
         }
         if (!hasWhea && string.IsNullOrWhiteSpace(ev.GpuVendor))
@@ -586,9 +823,70 @@ public class MainForm : Form
             _tbRaw.AppendText(ev.EventMessage);
         }
 
-        // 硬件回放：按崩溃时间匹配快照
+        // 硬件回放：按崩溃时间匹配快照，并传入事发前环境变更列表联动展示
         var snapshot = FindSnapshotByCrashTime(ev.Time);
-        _replayView.LoadSnapshot(snapshot);
+        _replayView.LoadSnapshot(snapshot, before);
+    }
+
+    private void CopySelectedForumPost()
+    {
+        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not CrashEvent ev) return;
+        try
+        {
+            var snap = FindSnapshotByCrashTime(ev.Time);
+            string post = ForumPostBuilder.BuildForEvent(ev, _envSnapshot, snap, _envChanges);
+            Clipboard.SetText(post);
+            _lblStatus.Text = "✅ 已将当前崩溃事件的「求助速帖」复制到剪贴板！";
+            MessageBox.Show(this, "已将当前崩溃的结构化求助信息复制到剪贴板，可直接粘贴至贴吧 / NGA / 论坛求助！",
+                "复制成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"复制失败：\n{ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void DoExportSelectedEventDumps()
+    {
+        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not CrashEvent ev) return;
+        var paths = ReportExporter.ResolveAllDumpPathsForEvent(ev);
+        var existing = paths.Where(File.Exists).ToList();
+        if (existing.Count == 0)
+        {
+            string detail = paths.Count > 0
+                ? $"事件记录了转储路径：\n{string.Join("\n", paths)}\n\n但磁盘上的原文件已被系统或清理工具删除。"
+                : "当前选中的崩溃事件未生成对应的 .dmp 转储文件（如纯断电重启或未开启系统转储）。\n可通过「🛠️ 排障工具箱 → 系统转储设置体检」开启 Minidump。";
+            MessageBox.Show(this, detail, "无可用转储文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        using var fbd = new FolderBrowserDialog
+        {
+            Description = $"选择导出 {existing.Count} 份转储文件 (.dmp) 的目标文件夹",
+            SelectedPath = Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            ShowNewFolderButton = true,
+        };
+        if (fbd.ShowDialog(this) != DialogResult.OK) return;
+
+        var (copiedCount, copiedFiles, errors) = ReportExporter.ExportEventDumpsToFolder(ev, fbd.SelectedPath);
+        if (copiedCount > 0)
+        {
+            _lblStatus.Text = $"✅ 已导出 {copiedCount} 份转储文件至 {fbd.SelectedPath}";
+            var res = MessageBox.Show(this,
+                $"成功导出 {copiedCount} 份 .dmp 转储文件：\n" + string.Join("\n", copiedFiles) +
+                (errors.Count > 0 ? "\n\n注意：\n" + string.Join("\n", errors) : "") +
+                "\n\n是否立即在资源管理器中定位该文件？",
+                "转储文件导出成功", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+            if (res == DialogResult.Yes)
+            {
+                try { System.Diagnostics.Process.Start("explorer.exe", $"/select,\"{copiedFiles[0]}\""); }
+                catch { }
+            }
+        }
+        else
+        {
+            MessageBox.Show(this, "导出失败：\n" + string.Join("\n", errors), "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     /// <summary>
@@ -613,7 +911,8 @@ public class MainForm : Form
     private void RefreshReplayForSelectedCrash()
     {
         if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not CrashEvent ev) return;
-        _replayView.LoadSnapshot(FindSnapshotByCrashTime(ev.Time));
+        var before = _envChanges.Where(c => c.Time <= ev.Time).OrderByDescending(c => c.Time).ToList();
+        _replayView.LoadSnapshot(FindSnapshotByCrashTime(ev.Time), before);
     }
 
     private void ClearDetail()
@@ -631,12 +930,12 @@ public class MainForm : Form
             FileName = $"CrashReport_{DateTime.Now:yyyyMMdd_HHmm}.zip",
             Filter = "Zip 压缩报告 (*.zip)|*.zip",
             DefaultExt = "zip",
-            Title = "导出崩溃报告包",
+            Title = "导出崩溃报告包 (含 HTML 报告与关联 .dmp 转储文件)",
             InitialDirectory = Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
         };
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
 
-        SetBusy(true, $"正在导出报告包 → {dlg.FileName}");
+        SetBusy(true, $"正在导出报告包及关联 .dmp 转储文件 → {dlg.FileName}");
         try
         {
             // 导出前若环境快照尚未生成（后台还在采集），现场补采一次
@@ -646,15 +945,13 @@ public class MainForm : Form
                 SetBusy(true, "正在采集环境快照…");
                 env = await Task.Run(() => CrashSniffer.Collectors.EnvironmentCollector.Collect());
                 _envSnapshot = env;
-                SetBusy(true, $"正在导出报告包 → {dlg.FileName}");
+                SetBusy(true, $"正在导出报告包及关联 .dmp 转储文件 → {dlg.FileName}");
             }
             var ranking = CrashAggregator.BuildSuspectRanking(_events);
 
             EnvironmentHistoryData envHistory;
             try { envHistory = EnvironmentHistoryStore.Load(); } catch { envHistory = new EnvironmentHistoryData(); }
 
-            // 导出包含大 dump 复制与 zip 压缩，放后台线程执行，避免冻结 UI；
-            // UI 相关值（时间范围、事件列表引用）先在 UI 线程取好再传入
             DateTime rangeStart = _dtpStart.Value;
             DateTime rangeEnd = _dtpEnd.Value;
             var eventsSnapshot = _events;
@@ -668,9 +965,11 @@ public class MainForm : Form
                 return;
             }
 
-            string msg = $"报告包已生成：\n{dlg.FileName}\n\n包含文件：\n- {result.FilesIncluded.Count} 个文件 (HTML + JSON + Dumps)";
+            string msg = $"报告包已生成：\n{dlg.FileName}\n\n" +
+                         $"• 包含文件总数：{result.FilesIncluded.Count} 个\n" +
+                         $"• 已自动打包转储 (.dmp)：{result.ExportedDumps.Count} 份 (位于压缩包 dumps/ 目录)";
             if (result.SkippedDumps.Count > 0)
-                msg += $"\n跳过 {result.SkippedDumps.Count} 个大文件 (超过500MB的dump未包含)\n";
+                msg += $"\n• 未包含源文件提示：{result.SkippedDumps.Count} 项 (详见 report.html 末尾说明)\n";
             var res = MessageBox.Show(this, msg + "\n\n是否立即打开所在文件夹？",
                 "导出成功", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
             if (res == DialogResult.Yes)
@@ -701,11 +1000,13 @@ public class MainForm : Form
     {
         _btnRefresh.Enabled = !busy;
         _btnExport.Enabled = !busy && _events.Count > 0;
-        // 扫描/导出期间一并禁用时间范围控件：中途改日期会触发 ValueChanged 造成扫描请求堆积
+        _btnExportDump.Enabled = !busy && _events.Count > 0;
+        _btnCopyPost.Enabled = !busy && _events.Count > 0;
         _dtpStart.Enabled = !busy;
         _dtpEnd.Enabled = !busy;
         foreach (ToolStripItem it in _topToolStrip.Items)
-            if (it is ToolStripButton) it.Enabled = !busy;
+            if (it is ToolStripButton && it != _btnExport && it != _btnExportDump && it != _btnCopyPost)
+                it.Enabled = !busy;
         _lblStatus.Text = statusText;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
     }
@@ -777,7 +1078,6 @@ public class MainForm : Form
             IntPtr h = bmp.GetHicon();
             try
             {
-                // Icon.FromHandle 不接管句柄所有权：Clone 出独立副本后销毁原 HICON
                 using var wrapper = Icon.FromHandle(h);
                 return (Icon)wrapper.Clone();
             }

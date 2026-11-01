@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup .NET 8
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '8.0.x'
+
+    - name: Restore dependencies
+      run: dotnet restore CrashSniffer.sln
+
+    - name: Build solution
+      run: dotnet build CrashSniffer.sln -c Release --no-restore
+
+    - name: Run unit tests
+      run: dotnet test CrashSniffer.sln -c Release --no-build --verbosity normal
+
+    - name: Publish single-file executable
+      run: dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-contained -o publish/win-x64
+
+    - name: Verify publish output
+      shell: pwsh
+      run: |
+        if (-not (Test-Path "publish/win-x64/CrashSniffer.exe")) {
+          Write-Error "CrashSniffer.exe was not generated in publish directory."
+          exit 1
+        }
+        Write-Host "Build and publish verified successfully."

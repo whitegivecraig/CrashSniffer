@@ -1,16 +1,19 @@
+using System;
+using System.Globalization;
+using System.Linq;
 using System.Xml.Linq;
 using CrashSniffer.Models;
 
 namespace CrashSniffer.Collectors;
 
 /// <summary>
-/// WHEA 事件细化解析：从事件 XML 中提取错误来源类型，
-/// 给出"出错部位"结论（CPU / PCIe 设备 / 内存），比单纯 Event ID 更精确
+/// WHEA 事件细化解析：从事件 XML 中提取错误来源类型与报错处理器 APIC ID，
+/// 给出"出错部位"结论（CPU 具体物理/逻辑核心 / PCIe 设备 / 内存），辅助超频与 Curve Optimizer 精准调校
 /// </summary>
 public static class WheaDetailParser
 {
     /// <summary>
-    /// 解析 WHEA 事件 XML，填充 ev.WheaHardwarePart（出错部位结论）
+    /// 解析 WHEA 事件 XML，填充 ev.WheaHardwarePart 与 ev.WheaApicId
     /// </summary>
     public static void Enrich(CrashEvent ev, int eventId, string xml)
     {
@@ -18,6 +21,7 @@ public static class WheaDetailParser
 
         string? sourceTypeRaw = null;
         string? errorTypeRaw = null;
+        string? apicIdRaw = null;
         try
         {
             var xdoc = XDocument.Parse(xml);
@@ -28,6 +32,8 @@ public static class WheaDetailParser
                 string? name = d.Attribute("Name")?.Value;
                 if (name == "ErrorSourceType") sourceTypeRaw = d.Value;
                 else if (name == "ErrorType") errorTypeRaw = d.Value;
+                else if (name is "ApicId" or "ProcessorApicId" && string.IsNullOrWhiteSpace(apicIdRaw))
+                    apicIdRaw = d.Value;
             }
         }
         catch
@@ -35,7 +41,39 @@ public static class WheaDetailParser
             // XML 解析失败就靠 eventId 判断
         }
 
-        ev.WheaHardwarePart = BuildHardwarePart(eventId, sourceTypeRaw, errorTypeRaw, ev.WheaErrorType);
+        int? apicId = ParseApicId(apicIdRaw);
+        if (apicId.HasValue)
+            ev.WheaApicId = apicId.Value;
+
+        string part = BuildHardwarePart(eventId, sourceTypeRaw, errorTypeRaw, ev.WheaErrorType);
+
+        if (apicId.HasValue && part.StartsWith("CPU", StringComparison.OrdinalIgnoreCase))
+        {
+            int logicalCore = apicId.Value;
+            int physicalCore = logicalCore / 2;
+            string corePin = $" [定位核心: 逻辑核 #{logicalCore} / 约物理核 #{physicalCore} (APIC={logicalCore})]";
+            part += corePin;
+
+            string coTip = $"🎯 超频/降压核心定位：报错来自 APIC ID {logicalCore}（逻辑核心 #{logicalCore}，开启 SMT/超线程时通常对应物理核心 #{physicalCore}）。若开启了 AMD PBO Curve Optimizer 或 Intel 分核降压，请单独将物理核心 #{physicalCore} 的负压调小（如向正方向回调 3~5）或加一点核心电压。";
+            if (!ev.Troubleshooting.Contains(coTip))
+                ev.Troubleshooting.Insert(0, coTip);
+        }
+
+        ev.WheaHardwarePart = part;
+    }
+
+    internal static int? ParseApicId(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        string s = raw.Trim();
+        if (s.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+        {
+            if (int.TryParse(s.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out int hexVal) && hexVal >= 0)
+                return hexVal;
+        }
+        if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out int decVal) && decVal >= 0)
+            return decVal;
+        return null;
     }
 
     /// <summary>

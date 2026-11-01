@@ -13,7 +13,7 @@ namespace CrashSniffer.UI;
 
 /// <summary>
 /// 崩溃时刻硬件读数回放视图：展示崩溃前后窗口内的时间序列曲线，
-/// 用红色竖线标注崩溃时刻。支持同单位多指标叠加、CSV / PNG 导出。
+/// 用红色竖线标注崩溃时刻。支持同单位多指标叠加、CSV / PNG 导出，以及事发前环境变更联动展示。
 /// GDI+ 自绘，不依赖第三方图表库。
 /// </summary>
 public class HardwareReplayView : UserControl
@@ -55,9 +55,11 @@ public class HardwareReplayView : UserControl
     private readonly Panel _chartPanel = new() { Dock = DockStyle.Fill, BackColor = Color.White };
 
     private HardwareSnapshot? _snapshot;
+    private IReadOnlyList<EnvironmentChange>? _preChanges;
     private bool _updatingChecks;
 
     private static readonly Color CrashLineColor = Color.FromArgb(0xdc, 0x26, 0x26);
+    private static readonly Color ChangeLineColor = Color.FromArgb(0xd9, 0x77, 0x06);
     private static readonly Color GridColor = Color.FromArgb(226, 232, 240);
 
     private static readonly Color[] SeriesPalette =
@@ -151,7 +153,7 @@ public class HardwareReplayView : UserControl
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Absolute, 190));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 96));
+        root.RowStyles.Add(new RowStyle(SizeType.Absolute, 108));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
         // 标题 + 右侧导出按钮；指标选择框独占一行，避免在窄面板里只露出两三行
@@ -203,10 +205,11 @@ public class HardwareReplayView : UserControl
         _btnPng.Enabled = false;
     }
 
-    /// <summary>加载崩溃快照并刷新曲线</summary>
-    public void LoadSnapshot(HardwareSnapshot? snapshot)
+    /// <summary>加载崩溃快照并刷新曲线（可选传入事发前环境变更列表做联合展示）</summary>
+    public void LoadSnapshot(HardwareSnapshot? snapshot, IReadOnlyList<EnvironmentChange>? preChanges = null)
     {
         _snapshot = snapshot;
+        _preChanges = preChanges;
         RebuildMetrics(snapshot);
         if (snapshot == null || snapshot.Readings.Count == 0)
         {
@@ -219,7 +222,7 @@ public class HardwareReplayView : UserControl
                             $"窗口内 {snapshot.Readings.Count} 个采样点{source}";
         }
         _btnCsv.Enabled = _btnPng.Enabled = snapshot is { Readings.Count: > 0 };
-        RenderFindings(snapshot);
+        RenderFindings(snapshot, preChanges);
         _chartPanel.Invalidate();
     }
 
@@ -280,35 +283,46 @@ public class HardwareReplayView : UserControl
         }
     }
 
-    private void RenderFindings(HardwareSnapshot? snapshot)
+    private void RenderFindings(HardwareSnapshot? snapshot, IReadOnlyList<EnvironmentChange>? preChanges)
     {
         _rtbFindings.Clear();
         if (snapshot == null || snapshot.Readings.Count == 0)
         {
             AppendFinding("🩺 崩溃前硬件分析：无读数可分析。", Color.Gray, bold: false);
-            return;
         }
-
-        var anomalies = HardwareAnomalyAnalyzer.Analyze(snapshot);
-        int preCount = HardwareAnomalyAnalyzer.GetPreCrashReadings(snapshot).Count;
-        AppendFinding($"🩺 崩溃前硬件分析（{preCount} 个采样点）：",
-            Color.FromArgb(0x1f, 0x29, 0x37), bold: true);
-
-        if (anomalies.Count == 0)
+        else
         {
-            AppendFinding("✅ 未发现明显硬件异常。", Color.FromArgb(0x04, 0x78, 0x57), bold: false);
-            return;
-        }
+            var anomalies = HardwareAnomalyAnalyzer.Analyze(snapshot);
+            int preCount = HardwareAnomalyAnalyzer.GetPreCrashReadings(snapshot).Count;
+            AppendFinding($"🩺 崩溃前硬件分析（{preCount} 个采样点 · 预设：{HardwareThresholds.PresetDisplayName(HardwareThresholds.CurrentPreset)}）：",
+                Color.FromArgb(0x1f, 0x29, 0x37), bold: true);
 
-        foreach (var a in anomalies)
-        {
-            string icon = a.Severity switch
+            if (anomalies.Count == 0)
             {
-                AnomalySeverity.Critical => "⛔",
-                AnomalySeverity.Warning => "⚠",
-                _ => "ℹ",
-            };
-            AppendFinding($"{icon} {a.Title}：{a.Detail}", AnomalyColor(a.Severity), bold: false);
+                AppendFinding("✅ 未发现明显硬件异常。", Color.FromArgb(0x04, 0x78, 0x57), bold: false);
+            }
+            else
+            {
+                foreach (var a in anomalies)
+                {
+                    string icon = a.Severity switch
+                    {
+                        AnomalySeverity.Critical => "⛔",
+                        AnomalySeverity.Warning => "⚠",
+                        _ => "ℹ",
+                    };
+                    AppendFinding($"{icon} {a.Title}：{a.Detail}", AnomalyColor(a.Severity), bold: false);
+                }
+            }
+        }
+
+        if (preChanges is { Count: > 0 })
+        {
+            DateTime refTime = snapshot?.CrashTime ?? preChanges[0].Time;
+            var recent = preChanges.Take(2).Select(c =>
+                $"{EnvironmentChangeDetector.RelativeBefore(refTime, c.Time)} {c.Item} ({c.OldValue}→{c.NewValue})");
+            AppendFinding($"🕐 关联事发前环境变更：{string.Join(" ； ", recent)}",
+                Color.FromArgb(0xb4, 0x53, 0x09), bold: false);
         }
     }
 
@@ -521,6 +535,23 @@ public class HardwareReplayView : UserControl
         {
             using var linePen = new Pen(s.Color, 1.8f);
             DrawSeries(g, linePen, readings, s.Values, tStart, timeSpan, padL, padT, w, h, yMin, yMax);
+        }
+
+        // 事发前环境变更标注（如果变更时间恰好落在采样时间窗内）
+        if (_preChanges is { Count: > 0 })
+        {
+            foreach (var ch in _preChanges)
+            {
+                double chFrac = (ch.Time - tStart).TotalSeconds / timeSpan;
+                if (chFrac >= 0 && chFrac <= 1)
+                {
+                    int chX = padL + (int)(w * chFrac);
+                    using var chPen = new Pen(ChangeLineColor, 1.5f) { DashStyle = DashStyle.Dot };
+                    g.DrawLine(chPen, chX, padT, chX, padT + h);
+                    using var chBrush = new SolidBrush(ChangeLineColor);
+                    g.DrawString($"变更:{ch.Item}", AxisFont, chBrush, chX + 3, padT + h - 18);
+                }
+            }
         }
 
         // 崩溃时刻标注

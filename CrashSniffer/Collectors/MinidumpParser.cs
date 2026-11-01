@@ -1,13 +1,18 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using CrashSniffer.Models;
+using CrashSniffer.Services;
 
 namespace CrashSniffer.Collectors;
 
 /// <summary>
-/// 解析 Windows Minidump (*.dmp) 文件，提取 BSOD 停止代码、参数、嫌疑驱动
-/// 使用内置解析，不依赖 WinDbg
+/// 解析 Windows Minidump (*.dmp) 与 PAGEDU64 内核/实时转储文件，
+/// 提取 BSOD 停止代码、参数、崩溃指令偏移 (driver+0xOffset) 与嫌疑驱动。
+/// 使用内置解析，不依赖 WinDbg。
 /// </summary>
 public static class MinidumpParser
 {
@@ -16,64 +21,72 @@ public static class MinidumpParser
     private const ulong PAGE_DUMP_SIG_64 = 0x3436554445474150; // "PAGEDU64" little-endian
 
     // Minidump Stream Types (MINIDUMP_STREAM_TYPE)
+    private const uint STREAM_THREAD_LIST = 0x03;
     private const uint STREAM_MODULE_LIST = 0x04;     // ModuleListStream
+    private const uint STREAM_EXCEPTION = 0x06;       // ExceptionStream
+    private const uint STREAM_SYSTEM_INFO = 0x07;
     private const uint STREAM_BUGCHECK = 0x11;        // BugCheckInfoStream (旧版)
     private const uint STREAM_BUGCHECK_INFO = 0x15;   // BugCheckInfoStream (新版 0x15)
-    private const uint STREAM_THREAD_LIST = 0x03;
-    private const uint STREAM_SYSTEM_INFO = 0x07;
 
-    [StructLayout(LayoutKind.Sequential, Pack = 4)]
-    private readonly struct MinidumpHeader
-    {
-        public readonly uint Signature;       // 0x00
-        public readonly ushort Version;       // 0x04
-        public readonly ushort NumberOfStreams; // 0x06
-        public readonly uint StreamDirRva;    // 0x08
-        public readonly uint CheckSum;        // 0x0C
-        public readonly uint TimeDateStamp;   // 0x10
-        public readonly ulong Flags;          // 0x14 (Flags ULONG64 从 0x18开始? 不对，实际是从 TimeDateStamp 后 4 字节 + 4字节padding后8字节? 需实测)
-        // 为避免 struct 字段对齐问题，直接用 reader 手动读
-    }
+    // PAGEDU64 _TRIAGE_DUMP64 每个 _DUMP_DRIVER_ENTRY64 结构体固定 0x90 (144) 字节
+    private const int TRIAGE_DRIVER_ENTRY_SIZE = 0x90;
 
     /// <summary>
-    /// 收集指定时间范围内的 minidump 文件并解析
+    /// 收集指定时间范围内的 minidump / MEMORY.DMP 文件并解析（含注册表自定义转储路径）
     /// </summary>
     public static List<CrashEvent> Collect(DateTime startTime, DateTime endTime)
     {
         var result = new List<CrashEvent>();
-        var scanPaths = new List<string>();
+        var scanPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         string winDir = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
 
-        // 标准 minidump 目录
+        // 标准 minidump 目录与 MEMORY.DMP
         string miniDir = Path.Combine(winDir, "Minidump");
         if (Directory.Exists(miniDir))
             scanPaths.Add(miniDir);
 
-        // MEMORY.DMP (系统盘根目录下的 WinDbg 内核 dump)
         string memDump = Path.Combine(winDir, "MEMORY.DMP");
         if (File.Exists(memDump))
             scanPaths.Add(memDump);
 
+        // 注册表 CrashControl 自定义路径补充
+        try
+        {
+            var cfg = CrashDumpConfigService.Inspect();
+            if (!string.IsNullOrWhiteSpace(cfg.MinidumpDir) && Directory.Exists(cfg.MinidumpDir))
+                scanPaths.Add(cfg.MinidumpDir);
+            if (!string.IsNullOrWhiteSpace(cfg.DumpFile) && File.Exists(cfg.DumpFile))
+                scanPaths.Add(cfg.DumpFile);
+        }
+        catch { /* 忽略注册表读取异常 */ }
+
+        var seenFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var path in scanPaths)
         {
             try
             {
                 if (File.Exists(path))
                 {
-                    ProcessDumpFile(path, startTime, endTime, result);
+                    if (seenFiles.Add(Path.GetFullPath(path)))
+                        ProcessDumpFile(path, startTime, endTime, result);
                 }
                 else if (Directory.Exists(path))
                 {
-                    foreach (var file in Directory.EnumerateFiles(path, "*.dmp", SearchOption.TopDirectoryOnly))
+                    var opts = new EnumerationOptions
                     {
-                        ProcessDumpFile(file, startTime, endTime, result);
+                        RecurseSubdirectories = false,
+                        IgnoreInaccessible = true,
+                    };
+                    foreach (var file in Directory.EnumerateFiles(path, "*.dmp", opts))
+                    {
+                        if (seenFiles.Add(Path.GetFullPath(file)))
+                            ProcessDumpFile(file, startTime, endTime, result);
                     }
                 }
             }
             catch (Exception ex)
             {
-                // 单个 dump 失败不影响整体
                 System.Diagnostics.Debug.WriteLine($"扫描 {path} 失败: {ex.Message}");
             }
         }
@@ -88,12 +101,19 @@ public static class MinidumpParser
             var fi = new FileInfo(filePath);
             if (!fi.Exists) return;
 
-            // 按文件最后修改时间过滤
-            if (fi.LastWriteTime < startTime || fi.LastWriteTime > endTime)
+            // 先放宽 ±30 分钟做文件修改时间粗筛（避免跨午夜蓝屏重启后文件落盘时间与内部崩溃时间戳偏差导致漏采）
+            DateTime looseStart = startTime > DateTime.MinValue.AddMinutes(30) ? startTime.AddMinutes(-30) : DateTime.MinValue;
+            DateTime looseEnd = endTime < DateTime.MaxValue.AddMinutes(-30) ? endTime.AddMinutes(30) : DateTime.MaxValue;
+            if (fi.LastWriteTime < looseStart || fi.LastWriteTime > looseEnd)
                 return;
 
             var ev = ParseFile(filePath);
-            if (ev != null)
+            if (ev == null) return;
+
+            // 只要文件修改时间或 dump 内部记录的崩溃时间落在查询区间内即收录
+            bool fileInWindow = fi.LastWriteTime >= startTime && fi.LastWriteTime <= endTime;
+            bool crashInWindow = ev.Time >= startTime && ev.Time <= endTime;
+            if (fileInWindow || crashInWindow)
                 result.Add(ev);
         }
         catch (Exception ex)
@@ -109,6 +129,9 @@ public static class MinidumpParser
     {
         try
         {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+                return null;
+
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var br = new BinaryReader(fs);
 
@@ -120,7 +143,7 @@ public static class MinidumpParser
             if (sig32 == MDMP_SIGNATURE)
                 return ParseMinidump(br, filePath);
 
-            // 判断是否为 64-bit kernel dump (PAGEDU64)
+            // 判断是否为 64-bit kernel / triage dump (PAGEDU64)
             ulong sig64 = br.ReadUInt64();
             fs.Position = 0;
             if (sig64 == PAGE_DUMP_SIG_64)
@@ -148,9 +171,8 @@ public static class MinidumpParser
             DumpPath = filePath,
             DumpSize = fi.Length,
         };
+        ev.AddDumpPath(filePath);
 
-        // 手动解析 Minidump Header
-        // Offset 0x00: Signature uint -> already read ok
         br.BaseStream.Position = 0x04;
         ushort version = br.ReadUInt16();
         ushort numStreams = br.ReadUInt16();
@@ -158,20 +180,20 @@ public static class MinidumpParser
         uint checksum = br.ReadUInt32();
         uint timeDateStamp = br.ReadUInt32();
 
-        // 如果文件时间戳和 dump 内部时间差异很大，优先用内部时间
         DateTime dumpTime = DateTimeOffset.FromUnixTimeSeconds(timeDateStamp).LocalDateTime;
         if (dumpTime > DateTime.MinValue.AddYears(1) && dumpTime < DateTime.Now.AddYears(1))
             ev.Time = dumpTime;
 
-        // 遍历所有 stream，找 BugCheckInfo 和 ModuleList
-        BugCheckInfo bugCheck = new BugCheckInfo();
+        BugCheckInfo bugCheck = new();
         List<ModuleInfo> modules = new();
+        uint exceptionCode = 0;
+        ulong exceptionAddress = 0;
 
         long baseStreamLen = br.BaseStream.Length;
 
         for (int i = 0; i < numStreams; i++)
         {
-            long pos = streamDirRva + i * 12; // 每个目录 12 字节
+            long pos = streamDirRva + (long)i * 12;
             if (pos + 12 > baseStreamLen) break;
 
             br.BaseStream.Position = pos;
@@ -189,59 +211,30 @@ public static class MinidumpParser
                 {
                     modules = ReadModuleList(br, rva, dataSize);
                 }
+                else if (streamType == STREAM_EXCEPTION)
+                {
+                    (exceptionCode, exceptionAddress) = ReadExceptionStream(br, rva, dataSize);
+                }
             }
             catch { /* ignore bad stream */ }
         }
 
-        // 填充 BugCheck
         ev.BugCheckCode = bugCheck.Code;
-        ev.BugCheckParams = bugCheck.Params;
+        ev.BugCheckParams = bugCheck.Params.Length == 4 ? bugCheck.Params : new ulong[4];
+        ev.ExceptionCode = exceptionCode;
+        ev.ExceptionAddress = exceptionAddress;
+
         var info = BugCheckKnowledge.Get(bugCheck.Code);
         ev.StopCode = info.Name;
         ev.StopCodeChinese = info.Chinese;
         ev.Troubleshooting.AddRange(info.Suggestions);
 
-        // 匹配嫌疑驱动：从 BugCheck 自带的关联驱动优先；否则用模块表里最后加载/最大的驱动
-        string suspect = bugCheck.DriverName;
-        if (string.IsNullOrWhiteSpace(suspect) && modules.Count > 0)
-        {
-            // 选最后 TimeDateStamp 最接近崩溃时间的 (TimeDateStamp 越大 = 越新)，作为"最后一个加载的有名字的驱动"
-            suspect = modules
-                .OrderByDescending(m => m.TimeDateStamp)
-                .FirstOrDefault(m => !string.IsNullOrWhiteSpace(m.Name) &&
-                                     !m.Name.Equals("ntoskrnl.exe", StringComparison.OrdinalIgnoreCase) &&
-                                     !m.Name.Equals("ntkrnlmp.exe", StringComparison.OrdinalIgnoreCase))
-                ?.Name ?? string.Empty;
-        }
+        var candidates = new List<ulong>();
+        if (exceptionAddress != 0) candidates.Add(exceptionAddress);
+        candidates.AddRange(ev.BugCheckParams);
 
-        // 再次兜底：BugCheck param 里常常包含驱动地址，简化处理用 param1/2/3 搜索匹配模块基址
-        if (string.IsNullOrWhiteSpace(suspect))
-        {
-            foreach (var p in bugCheck.Params)
-            {
-                if (p == 0) continue;
-                var matched = modules.FirstOrDefault(m => p >= m.BaseAddr && p < m.BaseAddr + (ulong)m.Size);
-                if (matched != null && !string.IsNullOrWhiteSpace(matched.Name))
-                {
-                    suspect = matched.Name;
-                    break;
-                }
-            }
-        }
+        ResolveSuspectAndOffset(ev, modules, bugCheck.DriverName, candidates, Array.Empty<ulong>());
 
-        ev.SuspectDriver = suspect ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(ev.SuspectDriver))
-        {
-            string desc = DriverKnowledge.Describe(ev.SuspectDriver);
-            if (!string.IsNullOrWhiteSpace(desc))
-                ev.SuspectDriver += $"  [{desc}]";
-
-            string vendor = DriverKnowledge.GuessGpuVendor(ev.SuspectDriver);
-            if (vendor != "未知")
-                ev.GpuVendor = vendor;
-        }
-
-        // 列表摘要
         ev.Summary = BuildSummary(ev);
         return ev;
     }
@@ -256,30 +249,40 @@ public static class MinidumpParser
             DumpPath = filePath,
             DumpSize = fi.Length,
         };
+        ev.AddDumpPath(filePath);
 
         try
         {
-            // _DUMP_HEADER64: 偏移 Signature 8B, ValidDump 4B (optional), Major/Minor 各 4B, 
-            // DirectoryTableBase 8B, PfnDataBase 8B, PsLoadedModuleList 8B, PsActiveProcessHead 8B,
-            // MachineImageType 4B, NumberOfProcessors 4B, BugCheckCode 4B, 4x8B BugCheckParams...
-            // 实际上 Microsoft 公开的 _DUMP_HEADER64 里 BugCheckCode 是 0x38 附近。实测 0x40。
-            // 用保守方式：搜索 0x500-0x1000 区间查找已知 pattern，或者直接读标准偏移。
-            br.BaseStream.Position = 0x40;
-            uint code = br.ReadUInt32();
+            // _DUMP_HEADER64 标准布局：
+            // 0x00: Signature ("PAGE") + ValidDump ("DU64") [8B]
+            // 0x08: MajorVersion [4B], 0x0C: MinorVersion [4B]
+            // 0x10: DirectoryTableBase [8B], 0x18: PfnDataBase [8B]
+            // 0x20: PsLoadedModuleList [8B], 0x28: PsActiveProcessHead [8B]
+            // 0x30: MachineImageType [4B], 0x34: NumberOfProcessors [4B]
+            // 0x38: BugCheckCode [4B], 0x3C: 4B 对齐填充 ("PAGE" = 0x45474150)
+            // 0x40..0x5F: BugCheckParameter1..4 [4 x 8B]
+            br.BaseStream.Position = 0x38;
+            uint codeAt38 = br.ReadUInt32();
+            uint padAt3C = br.ReadUInt32();
             ulong p1 = br.ReadUInt64();
             ulong p2 = br.ReadUInt64();
             ulong p3 = br.ReadUInt64();
             ulong p4 = br.ReadUInt64();
 
-            // 粗略校验：如果 code=0 且全参数=0，则偏移不对，尝试 0x38
-            if (code == 0 && p1 == 0 && p2 == 0 && p3 == 0 && p4 == 0)
+            uint code = codeAt38;
+            // 兼容非标准紧凑头（若 0x38 为 0 且 0x3C 不是 PAGE 填充，则尝试从 0x40 读取）
+            if (code == 0 && padAt3C != PAGE_DUMP_SIG_32 && br.BaseStream.Length >= 0x68)
             {
-                br.BaseStream.Position = 0x38;
-                code = br.ReadUInt32();
-                p1 = br.ReadUInt64();
-                p2 = br.ReadUInt64();
-                p3 = br.ReadUInt64();
-                p4 = br.ReadUInt64();
+                br.BaseStream.Position = 0x40;
+                uint altCode = br.ReadUInt32();
+                if (altCode != 0 && altCode <= 0x10000FFF)
+                {
+                    code = altCode;
+                    p1 = br.ReadUInt64();
+                    p2 = br.ReadUInt64();
+                    p3 = br.ReadUInt64();
+                    p4 = br.ReadUInt64();
+                }
             }
 
             ev.BugCheckCode = code;
@@ -289,17 +292,308 @@ public static class MinidumpParser
             ev.StopCode = info.Name;
             ev.StopCodeChinese = info.Chinese;
             ev.Troubleshooting.AddRange(info.Suggestions);
+
+            // 解析 _TRIAGE_DUMP64（Windows 64 位小内存转储 Minidump 与 LiveKernelReport 均采用此结构）
+            var (modules, exCode, exAddr, ripAddr, stackAddrs) = ReadTriageDump64(br);
+            if (exCode != 0) ev.ExceptionCode = exCode;
+            if (exAddr != 0) ev.ExceptionAddress = exAddr;
+            else if (ripAddr != 0) ev.ExceptionAddress = ripAddr;
+
+            if (modules.Count > 0)
+            {
+                var candidates = new List<ulong>();
+                if (exAddr != 0) candidates.Add(exAddr);
+                if (ripAddr != 0 && ripAddr != exAddr) candidates.Add(ripAddr);
+                candidates.AddRange(ev.BugCheckParams);
+
+                ResolveSuspectAndOffset(ev, modules, string.Empty, candidates, stackAddrs);
+            }
         }
         catch
         {
-            // Kernel dump 解析失败则留给用户用 WinDbg
             ev.StopCode = "未解析";
-            ev.StopCodeChinese = "内核/完整内存 dump：请使用 WinDbg Preview 打开 MEMORY.DMP 执行 !analyze -v";
-            ev.Troubleshooting.Add("该 dump 为完整内存 dump，内置解析仅提供元数据，请用 WinDbg Preview 打开并执行 !analyze -v 深入分析");
+            ev.StopCodeChinese = "内核/完整内存 dump：请使用 WinDbg Preview 打开执行 !analyze -v";
+            ev.Troubleshooting.Add("该 dump 为内核内存转储，请用 WinDbg Preview 打开并执行 !analyze -v 深入分析");
         }
 
         ev.Summary = BuildSummary(ev);
         return ev;
+    }
+
+    /// <summary>
+    /// 从 PAGEDU64 的 _TRIAGE_DUMP64 区域提取驱动模块表、异常记录、线程上下文 RIP 与内核调用栈地址
+    /// </summary>
+    private static (List<ModuleInfo> modules, uint exCode, ulong exAddr, ulong rip, List<ulong> stackAddrs)
+        ReadTriageDump64(BinaryReader br)
+    {
+        var modules = new List<ModuleInfo>();
+        var stackAddrs = new List<ulong>();
+        uint exCode = 0;
+        ulong exAddr = 0;
+        ulong rip = 0;
+
+        long streamLen = br.BaseStream.Length;
+        // _TRIAGE_DUMP64 通常位于偏移 0x2000（部分早期版本位于 0x1000）
+        foreach (long headerBase in new[] { 0x2000L, 0x1000L })
+        {
+            if (headerBase + 0x40 > streamLen) continue;
+
+            br.BaseStream.Position = headerBase + 0x0C;
+            uint contextOffset = br.ReadUInt32();
+            uint exceptionOffset = br.ReadUInt32();
+            br.BaseStream.Position = headerBase + 0x28;
+            uint callStackOffset = br.ReadUInt32();
+            uint sizeOfCallStack = br.ReadUInt32();
+            uint driverListOffset = br.ReadUInt32();
+            uint driverCount = br.ReadUInt32();
+            uint stringPoolOffset = br.ReadUInt32();
+
+            if (driverCount == 0 || driverCount > 4096) continue;
+            if (driverListOffset < 0x1000 || driverListOffset + (long)driverCount * TRIAGE_DRIVER_ENTRY_SIZE > streamLen)
+                continue;
+            if (stringPoolOffset != 0 && (stringPoolOffset < driverListOffset || stringPoolOffset >= streamLen))
+                continue;
+
+            // 读取驱动模块列表 (_DUMP_DRIVER_ENTRY64, 每项 0x90 字节)
+            for (int i = 0; i < driverCount; i++)
+            {
+                long entryPos = driverListOffset + (long)i * TRIAGE_DRIVER_ENTRY_SIZE;
+                if (entryPos + TRIAGE_DRIVER_ENTRY_SIZE > streamLen) break;
+
+                br.BaseStream.Position = entryPos;
+                uint nameOffset = br.ReadUInt32();
+
+                br.BaseStream.Position = entryPos + 0x38;
+                ulong baseOfImage = br.ReadUInt64();
+
+                br.BaseStream.Position = entryPos + 0x48;
+                uint sizeOfImage = br.ReadUInt32();
+
+                br.BaseStream.Position = entryPos + 0x88;
+                uint timeDateStamp = br.ReadUInt32();
+
+                string name = ReadTriageCountedString(br, nameOffset, streamLen);
+                if (!string.IsNullOrWhiteSpace(name) && baseOfImage != 0)
+                {
+                    modules.Add(new ModuleInfo(baseOfImage, sizeOfImage, timeDateStamp, name));
+                }
+            }
+
+            if (modules.Count == 0) continue;
+
+            // 读取 _EXCEPTION_RECORD64 (ExceptionCode at +0x00, ExceptionAddress at +0x10)
+            if (exceptionOffset >= 0x200 && exceptionOffset + 0x20 <= streamLen)
+            {
+                try
+                {
+                    br.BaseStream.Position = exceptionOffset;
+                    exCode = br.ReadUInt32();
+                    br.BaseStream.Position = exceptionOffset + 0x10;
+                    ulong addr = br.ReadUInt64();
+                    if (addr > 0xFFFF000000000000UL) exAddr = addr;
+                }
+                catch { }
+            }
+
+            // 读取 x64 _CONTEXT 的 RIP (+0xF8)
+            if (contextOffset >= 0x200 && contextOffset + 0x100 <= streamLen)
+            {
+                try
+                {
+                    br.BaseStream.Position = contextOffset + 0xF8;
+                    ulong candidateRip = br.ReadUInt64();
+                    if (candidateRip > 0xFFFF000000000000UL) rip = candidateRip;
+                }
+                catch { }
+            }
+
+            // 读取调用栈区的内核返回地址
+            if (callStackOffset >= 0x200 && sizeOfCallStack is > 0 and <= 0x10000 &&
+                callStackOffset + sizeOfCallStack <= streamLen)
+            {
+                try
+                {
+                    br.BaseStream.Position = callStackOffset;
+                    int count = (int)(sizeOfCallStack / 8);
+                    for (int s = 0; s < count; s++)
+                    {
+                        ulong ptr = br.ReadUInt64();
+                        if (ptr > 0xFFFF800000000000UL)
+                            stackAddrs.Add(ptr);
+                    }
+                }
+                catch { }
+            }
+
+            break;
+        }
+
+        return (modules, exCode, exAddr, rip, stackAddrs);
+    }
+
+    private static string ReadTriageCountedString(BinaryReader br, uint offset, long streamLen)
+    {
+        if (offset == 0 || offset + 4 > streamLen) return string.Empty;
+        try
+        {
+            br.BaseStream.Position = offset;
+            uint byteLen = br.ReadUInt32();
+            if (byteLen == 0 || byteLen > 1024) return string.Empty;
+            int byteCount = (int)byteLen;
+            if (offset + 4 + byteCount > streamLen) return string.Empty;
+            byte[] bytes = br.ReadBytes(byteCount);
+            string s = Encoding.Unicode.GetString(bytes);
+            int nul = s.IndexOf('\0');
+            return (nul >= 0 ? s.Substring(0, nul) : s).Trim();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+    }
+
+    private static void ResolveSuspectAndOffset(
+        CrashEvent ev,
+        List<ModuleInfo> modules,
+        string explicitDriver,
+        IReadOnlyList<ulong> primaryAddresses,
+        IReadOnlyList<ulong> stackAddresses)
+    {
+        string suspect = explicitDriver ?? string.Empty;
+        string thirdPartyOffset = string.Empty;
+        string subsystemOffset = string.Empty;
+        string subsystemDriver = string.Empty;
+        string kernelOffset = string.Empty;
+
+        // 1. 先检查异常地址、RIP 与 BugCheck 4 个参数
+        foreach (ulong addr in primaryAddresses)
+        {
+            if (addr == 0) continue;
+            var m = FindModuleByAddress(modules, addr);
+            if (m == null) continue;
+
+            string fileName = Path.GetFileName(m.Name);
+            string formattedOffset = $"{fileName}+0x{addr - m.BaseAddr:X}";
+
+            if (!IsCoreKernelModule(fileName) && !IsSubsystemWrapperModule(fileName))
+            {
+                if (string.IsNullOrEmpty(thirdPartyOffset))
+                    thirdPartyOffset = formattedOffset;
+                if (string.IsNullOrWhiteSpace(suspect))
+                    suspect = fileName;
+                break;
+            }
+            else if (IsSubsystemWrapperModule(fileName))
+            {
+                if (string.IsNullOrEmpty(subsystemOffset))
+                {
+                    subsystemOffset = formattedOffset;
+                    subsystemDriver = fileName;
+                }
+            }
+            else if (string.IsNullOrEmpty(kernelOffset))
+            {
+                kernelOffset = formattedOffset;
+            }
+        }
+
+        // 2. 若主参数未命中第三方驱动，扫描调用栈寻找首个第三方驱动或图形/硬件子系统驱动
+        if (string.IsNullOrWhiteSpace(suspect) && stackAddresses.Count > 0)
+        {
+            foreach (ulong addr in stackAddresses)
+            {
+                var m = FindModuleByAddress(modules, addr);
+                if (m == null) continue;
+
+                string fileName = Path.GetFileName(m.Name);
+                string formattedOffset = $"{fileName}+0x{addr - m.BaseAddr:X}";
+
+                if (!IsCoreKernelModule(fileName) && !IsSubsystemWrapperModule(fileName))
+                {
+                    suspect = fileName;
+                    if (string.IsNullOrEmpty(thirdPartyOffset))
+                        thirdPartyOffset = formattedOffset;
+                    break;
+                }
+                if (IsSubsystemWrapperModule(fileName) && string.IsNullOrEmpty(subsystemOffset))
+                {
+                    subsystemOffset = formattedOffset;
+                    subsystemDriver = fileName;
+                }
+                else if (string.IsNullOrEmpty(kernelOffset))
+                {
+                    kernelOffset = formattedOffset;
+                }
+            }
+        }
+
+        // 3. 确定最终的崩溃指令偏移 (FaultingModuleOffset)
+        ev.FaultingModuleOffset = !string.IsNullOrEmpty(thirdPartyOffset) ? thirdPartyOffset
+            : !string.IsNullOrEmpty(subsystemOffset) ? subsystemOffset
+            : kernelOffset;
+
+        // 4. 确定嫌疑驱动
+        if (string.IsNullOrWhiteSpace(suspect))
+        {
+            if (!string.IsNullOrEmpty(subsystemDriver))
+            {
+                suspect = subsystemDriver;
+            }
+            else if (modules.Count > 0)
+            {
+                // 兜底：选 TimeDateStamp 最新（编译时间最近）的非内核核心模块
+                suspect = modules
+                    .Where(m => !string.IsNullOrWhiteSpace(m.Name) && !IsCoreKernelModule(Path.GetFileName(m.Name)))
+                    .OrderByDescending(m => m.TimeDateStamp)
+                    .FirstOrDefault()?.Name ?? string.Empty;
+            }
+        }
+
+        ev.SuspectDriver = Path.GetFileName(suspect ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(ev.SuspectDriver))
+        {
+            string desc = DriverKnowledge.Describe(ev.SuspectDriver);
+            if (!string.IsNullOrWhiteSpace(desc))
+                ev.SuspectDriver += $"  [{desc}]";
+
+            string vendor = DriverKnowledge.GuessGpuVendor(ev.SuspectDriver);
+            if (vendor != "未知")
+                ev.GpuVendor = vendor;
+        }
+    }
+
+    private static ModuleInfo? FindModuleByAddress(List<ModuleInfo> modules, ulong addr)
+    {
+        foreach (var m in modules)
+        {
+            if (m.Size > 0 && addr >= m.BaseAddr && addr < m.BaseAddr + m.Size)
+                return m;
+        }
+        return null;
+    }
+
+    private static bool IsCoreKernelModule(string fileName)
+    {
+        return fileName.Equals("ntoskrnl.exe", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("ntkrnlmp.exe", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("ntkrnlpa.exe", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("hal.dll", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("kdcom.dll", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("pshed.dll", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("werkernel.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("ntosext.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("watchdog.sys", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsSubsystemWrapperModule(string fileName)
+    {
+        return fileName.Equals("dxgkrnl.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("dxgmms2.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("dxgmms1.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("win32k.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("win32kbase.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("win32kfull.sys", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals("Wdf01000.sys", StringComparison.OrdinalIgnoreCase);
     }
 
     private static CrashEvent ParseKernelDump32(BinaryReader br, string filePath)
@@ -312,10 +606,10 @@ public static class MinidumpParser
             DumpPath = filePath,
             DumpSize = fi.Length,
         };
+        ev.AddDumpPath(filePath);
 
         try
         {
-            // _DUMP_HEADER32: BugCheckCode offset 0x20
             br.BaseStream.Position = 0x20;
             uint code = br.ReadUInt32();
             uint p1 = br.ReadUInt32();
@@ -342,6 +636,20 @@ public static class MinidumpParser
         return ev;
     }
 
+    private static (uint code, ulong address) ReadExceptionStream(BinaryReader br, uint rva, uint dataSize)
+    {
+        // MINIDUMP_EXCEPTION_STREAM:
+        // ThreadId (4B) + __alignment (4B) + MINIDUMP_EXCEPTION (ExceptionCode 4B at +8, ExceptionAddress 8B at +24)
+        if (rva == 0 || dataSize < 32 || rva + 32 > (ulong)br.BaseStream.Length)
+            return (0, 0);
+
+        br.BaseStream.Position = rva + 8;
+        uint code = br.ReadUInt32();
+        br.BaseStream.Position = rva + 24;
+        ulong address = br.ReadUInt64();
+        return (code, address);
+    }
+
     private sealed class BugCheckInfo
     {
         public uint Code;
@@ -356,14 +664,10 @@ public static class MinidumpParser
 
     private static BugCheckInfo ReadBugCheckInfo(BinaryReader br, uint rva, uint size)
     {
-        // 边界校验：rva 越界时返回空结果，而不是让 EndOfStreamException
-        // 在上游被吞掉导致整条 BugCheck 信息全部丢失
         if (rva >= (ulong)br.BaseStream.Length) return new BugCheckInfo();
         br.BaseStream.Position = rva;
         long available = br.BaseStream.Length - rva;
 
-        // MINIDUMP_BUGCHECK_DATA: Code(4) + Param1..4(各 8) + DriverRva(4) + ReasonRva(4)
-        // 字段级边界检查：数据不足时读到哪算哪，保留已读出的部分
         uint code = 0;
         ulong p1 = 0, p2 = 0, p3 = 0, p4 = 0;
         if (available >= 4) code = br.ReadUInt32();
@@ -375,7 +679,6 @@ public static class MinidumpParser
         string driverName = string.Empty;
         try
         {
-            // 驱动名 Rva 区域：流内实际可读字节数也要够，否则跳过
             if (size >= 4 + 32 + 8 && available >= 4 + 32 + 8)
             {
                 uint driverRva = br.ReadUInt32();
@@ -399,7 +702,7 @@ public static class MinidumpParser
             uint lengthBytes = br.ReadUInt32();
             if (lengthBytes == 0 || lengthBytes > 0x400) return string.Empty;
             byte[] bytes = br.ReadBytes((int)lengthBytes);
-            return System.Text.Encoding.Unicode.GetString(bytes).TrimEnd('\0');
+            return Encoding.Unicode.GetString(bytes).TrimEnd('\0');
         }
         catch
         {
@@ -427,17 +730,9 @@ public static class MinidumpParser
         {
             br.BaseStream.Position = rva;
             uint count = br.ReadUInt32();
-            if (count > 4096) count = 4096; // 防止异常值
+            if (count > 4096) count = 4096;
 
-            // MINIDUMP_MODULE:
-            // ULONG64 BaseOfImage       8
-            // ULONG32 SizeOfImage       4 (total 12)
-            // ULONG32 CheckSum          4 (16)
-            // ULONG32 TimeDateStamp     4 (20)
-            // ULONG32 ModuleNameRva     4 (24)
-            // VS_FIXEDFILEINFO: dwSignature..dwFileFlagsMask..共 13 ULONG32 = 52 bytes → offset 24+52 = 76 结束
-            const int MODULE_SIZE = 108; // 实际 MINIDUMP_MODULE 各字段合计 108 字节 (可查 Windows DDK)
-            // 保守用 sizeof-like: 实测官方 108
+            const int MODULE_SIZE = 108;
 
             for (int i = 0; i < count; i++)
             {
@@ -462,15 +757,18 @@ public static class MinidumpParser
 
     private static string BuildSummary(CrashEvent ev)
     {
-        string sizeStr = ev.DumpSize > 0 ? $" ({ev.DumpSize / 1024 / 1024} MB)" : string.Empty;
+        string sizeStr = ev.DumpSize > 0 ? $" ({CrashEvent.FormatFileSize(ev.DumpSize)})" : string.Empty;
         if (ev.BugCheckCode == 0)
             return $"dump 文件{sizeStr}，停止代码未解析";
 
         string prefix = $"0x{ev.BugCheckCode:X}";
         string codeName = ev.StopCode == "UNKNOWN" ? prefix : $"{prefix} {ev.StopCode}";
-        string driver = !string.IsNullOrWhiteSpace(ev.SuspectDriver)
-            ? $"，嫌疑: {ExtractDriverBase(ev.SuspectDriver)}" : string.Empty;
-        return $"{codeName}{driver}{sizeStr}";
+        string target = !string.IsNullOrWhiteSpace(ev.FaultingModuleOffset)
+            ? $"，位置: {ev.FaultingModuleOffset}"
+            : !string.IsNullOrWhiteSpace(ev.SuspectDriver)
+                ? $"，嫌疑: {ExtractDriverBase(ev.SuspectDriver)}"
+                : string.Empty;
+        return $"{codeName}{target}{sizeStr}";
     }
 
     private static string ExtractDriverBase(string s)
