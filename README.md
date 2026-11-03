@@ -8,15 +8,19 @@
 
 ### 🔍 深度采集与内核转储解析
 - **PAGEDU64 `_TRIAGE_DUMP64` 深度解析**：无需 WinDbg，直接解析 Windows 64 位内核转储的 `_EXCEPTION_RECORD64`、`_CONTEXT` (`RIP`) 与已加载内核模块表，精准定位**崩溃指令地址**与**故障模块+偏移量**（如 `amdkmdag.sys+0x1D0FB0`）及精确时间戳
+- **Minidump 已卸载驱动 (`UnloadedModuleListStream`) 深度追踪**：解析 Minidump 流类型 14，精准捕获崩溃发生前卸载的内核驱动，当崩溃发生在已卸载代码段时，自动标记 `driver.sys+0xOffset [已卸载]`，破解反作弊与外设驱动卸载后引发悬空指针崩溃的定位难题
 - **全量转储关联保留**：同一崩溃聚合窗口内的多个 `.dmp` 文件（如 `Watchdog` 连续生成的多个 `LiveKernelReports` + `Minidump`）全部保留在 `AssociatedDumpPaths` 中，绝不覆盖丢失
+- **WER 错误报告归档 (`ReportArchive`) 深度回溯**：全面扫描系统及用户级 WER 目录，在 `.dmp` 转储被系统临时清理时，自动解析 `Report.wer` 恢复蓝屏停止代码、四维参数、故障驱动名与崩溃时间戳
 - **系统事件日志全覆盖**：`Kernel-Power 41`、`WER-SystemErrorReporting 1001`（自动解析 `param1`/`param2` 十六进制蓝屏代码与四维参数）、`EventLog 6008`、`WHEA-Logger`（含 17/18/19/46/47 全事件 ID 部位识别）、`Display TDR (4101~4105)`、`nvlddmkm` / `amdkmdag` 显卡驱动事件，以及 **`DriverFrameworks-UserMode (10110/10111)` 用户态驱动宿主崩溃**
 - **环境快照与变更追踪**：自动采集 CPU / 主板 / BIOS / 显卡与驱动版本（规范化 `YYYY-MM-DD` 日期） / 内存频率（含 XMP/EXPO 状态推断） / 芯片组驱动 / Windows 内存诊断结果，每次扫描自动比对环境变更并关联「事发前变更」
 
 ### 🧠 智能分析与排障工具箱
+- **⚡ 本地 WinDbg / `cdb.exe` 深度调试器集成**：自动探查本地安装的 Windows SDK 或微软商店 WinDbg Preview 调试引擎；支持对在盘 `.dmp` 执行自动化 `!analyze -v`，提取符号化内核调用栈与 `FAILURE_BUCKET_ID`，弹窗展示并支持一键复制完整输出
+- **⚠️ 已知高危/冲突驱动特征知识库 (`ProblematicDriverKnowledge`)**：针对灯控外设（`AsIO`、`GLckIO`、`ene`、`GDRV`、`corsairvbus`、`lgdcore`、`rzdev`）、游戏反作弊（`vgk`、`EasyAntiCheat`、`bedrive`、`acebase`、`mhyprot`）、老版无线网卡（`netwtw`、`rtwlane`）等驱动特征，精准生成高危驱动警报并提供针对性解决方案
 - **智能事件聚合与实时检索**：30 分钟窗口自动归并同源崩溃（严重度：`BSOD > WHEA > TDR > Event 41 > 6008`）；支持按事件类型快速过滤与关键词实时搜索（驱动名、错误码、模块偏移等）
 - **停止代码与驱动知识库**：内置 30+ 常见蓝屏停止代码与 70+ 常见内核/外设/反作弊/RGB 驱动中文解读及针对性排障建议，自动统计「惯犯驱动排行」
 - **🔧 系统转储配置体检与一键修复**：自动检测注册表 `CrashControl`（小内存转储是否开启、`AlwaysKeepMemoryDump` 防覆盖、系统日志写入、分页文件大小、`Minidump` 目录），发现配置缺失可一键修复，避免下次蓝屏不留 `.dmp`
-- **📋 一键生成求诊帖**：支持将当前选中崩溃或全局汇总一键生成结构化 Markdown 排障帖（含环境配置、蓝屏代码、模块偏移、硬件异常摘要與已关联转储清单）并复制到剪贴板，可直接发往贴吧 / NGA / Chiphell / V2EX
+- **📋 一键生成求诊帖**：支持将当前选中崩溃或全局汇总一键生成结构化 Markdown 排障帖（含环境配置、蓝屏代码、模块偏移、硬件异常摘要、驱动预警、已卸载驱动與已关联转储清单）并复制到剪贴板，可直接发往贴吧 / NGA / Chiphell / V2EX
 - **📂 一键导出 / 定位 `.dmp`**：详情页与顶部工具栏支持一键在资源管理器中高亮定位原始 `.dmp` 文件，或将选中事件的全部关联 `.dmp` 单独导出到指定目录
 
 ### 🌡️ 硬件健康监控与崩溃黑匣子（免 WinRing0 拦截）
@@ -60,7 +64,7 @@
 git clone https://github.com/whitegivecraig/CrashSniffer.git
 cd CrashSniffer
 
-# 运行全部单元测试（185 项）
+# 运行全部单元测试（189 项）
 dotnet test -c Release
 
 # 发布单文件独立可执行文件
@@ -85,6 +89,13 @@ dotnet publish CrashSniffer/CrashSniffer.csproj -c Release -r win-x64 --self-con
 本项目基于 .NET 8 运行时，使用 System.Text.Json、System.Diagnostics.EventLog、System.Management（均为 MIT 许可）与 LibreHardwareMonitorLib（MPL-2.0），详见 [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt)。
 
 ## 📝 更新日志
+
+### v2.6.0
+- **新增**：**Minidump 已卸载驱动 (`UnloadedModuleListStream`) 深度追踪** —— 解析流类型 14 (`0x0E`)，提取崩溃前已卸载驱动列表；当崩溃地址或 BugCheck 参数落在已卸载模块地址区间时，自动将偏移标注为 `driver.sys+0xOffset [已卸载]`，完美解决反作弊/外设驱动卸载后遗留回调引发 0x3B / 0x139 / 0xCE 蓝屏却无法在已加载模块表中寻址的定位盲区
+- **新增**：**已知高危/冲突驱动特征知识库 (`ProblematicDriverKnowledge`)** —— 深度覆盖主板灯控（`AsIO`、`GLckIO`、`ene`、`GDRV`）、外设驱动（`corsairvbus`、`lgdcore`、`rzdev`）、游戏反作弊（`vgk`、`EasyAntiCheat`、`bedrive`、`acebase`、`mhyprot`）、老版无线网卡（`netwtw`、`rtwlane`）与虚拟机驱动（`vboxdrv`）；自动生成高危驱动警报，并在详情面板、HTML 导出报告与发帖摘要中高亮提示并注入专项排障建议
+- **新增**：**Windows Error Reporting (WER) 归档目录全量扫描** —— 自动检索 `%ProgramData%\Microsoft\Windows\WER\ReportArchive`、`ReportQueue` 与 `%LocalAppData%\...`；在磁盘 `.dmp` 原文件被 Windows 维护任务清理时，自动解析 `Report.wer` 恢复蓝屏停止代码、四维参数、故障驱动名与精确时刻
+- **新增**：**⚡ 本地 WinDbg / `cdb.exe` 深度调试引擎集成 (`WinDbgService`)** —— 自动检测本地 Windows SDK 与微软商店 WinDbg Preview 调试器；主界面一键对在盘 `.dmp` 执行全自动 `!analyze -v`，提取内核符号化调用栈 (`STACK_TEXT`) 与故障特征桶 (`FAILURE_BUCKET_ID`)，弹窗展示并支持一键复制完整输出
+- **测试**：新增 4 项深度单元测试（高危驱动匹配、WER 归档解析、Unloaded 模块仿真、WinDbg 输出正则抽取），全套单元测试扩充至 **189 项** 100% 通过
 
 ### v2.5.0
 - **新增**：**免 `WinRing0` 驱动的底层传感器直采桥接器 (`InpOutSensorBridge`)** —— 默认阻止释放 `WinRing0x64.sys`，彻底解决 Windows Defender 报毒拦截 `VulnerableDriver:WinNT/Winring0` 的问题；通过 ACPI `MCFG` 物理内存映射与 SuperIO 端口桥接直接采集 AMD Ryzen SMU / PM Table（CPU `Tctl/Tdie` 温度、`PPT` 功耗、16 线程实时加速频率、`Vcore`/`SoC` 电压）与主板 `NCT679xD`/`ITE` 传感器（主板温度、`+12V`/`+5V`/`+3.3V`/`3VSB`/`CMOS` 电压、风扇转速与占空比）

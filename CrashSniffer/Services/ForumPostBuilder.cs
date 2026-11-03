@@ -40,6 +40,15 @@ public static class ForumPostBuilder
         if (!string.IsNullOrWhiteSpace(ev.SuspectDriver))
             sb.AppendLine($"⚠️ 嫌疑驱动：{ev.SuspectDriver}");
 
+        if (!string.IsNullOrWhiteSpace(ev.ProblematicDriverWarning))
+            sb.AppendLine($"⚡ 驱动预警：{ev.ProblematicDriverWarning}");
+
+        if (ev.UnloadedDrivers.Count > 0)
+            sb.AppendLine($"📦 已卸载驱动 ({ev.UnloadedDrivers.Count} 个)：{string.Join(", ", ev.UnloadedDrivers)}");
+
+        if (ev.WinDbgOutput != null && !string.IsNullOrWhiteSpace(ev.WinDbgOutput.FailureBucket))
+            sb.AppendLine($"🛠️ WinDbg 故障桶：{ev.WinDbgOutput.FailureBucket}");
+
         var dumps = ev.GetEffectiveDumpPaths();
         if (dumps.Count > 0)
         {

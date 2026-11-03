@@ -250,3 +250,82 @@ public static class DriverKnowledge
         return "未知";
     }
 }
+
+/// <summary>
+/// 社区已知高发冲突/崩溃/易损驱动特征库（主板灯控、反作弊、老旧外设驱动等）
+/// </summary>
+public static class ProblematicDriverKnowledge
+{
+    public record ProblematicDriverRule(
+        string Prefix,
+        string Category,
+        string ProblemDescription,
+        string RecommendedAction);
+
+    private static readonly ProblematicDriverRule[] _rules =
+    [
+        new("asio", "主板灯控/工具", "华硕 Armoury Crate / AI Suite 底层驱动，已知存在内核栈溢出与内存越界缺陷 (CVE-2018-18537)，极易引发 0x3B / 0x0A 蓝屏", "建议卸载 AI Suite 或通过官方 Armoury Crate Uninstall Tool 干净卸载重装最新版"),
+        new("glckio", "主板灯控", "华擎 Polychrome RGB 灯控底层驱动，存在内核地址越界访问缺陷，易引发 0xD1 / 0x3B 蓝屏", "建议卸载或更新 ASRock Polychrome RGB 软件，或在服务中禁用该驱动"),
+        new("ene", "内存/主板灯控", "芝奇/各厂商 RGB 内存通用 ENE 灯控驱动，存在内核 I/O 竞态漏洞，高发 0x139 (KERNEL_SECURITY_CHECK_FAILURE)", "建议升级灯控软件或使用开源 OpenRGB 替代厂商自带灯控工具"),
+        new("gdrv", "主板灯控/工具", "技嘉 RGB Fusion / AORUS Engine 底层驱动，已知存在内核提权与非法内存访问漏洞 (CVE-2018-19320)", "建议彻底卸载 Gigabyte App Center 及关联灯控组件，更新至 GCC 官方最新版本"),
+        new("aoddrive", "超频软件残留", "AMD OverDrive 极早期老版本超频调试驱动残留，在 Win10/11 上与电源管理冲突高发 0x7E/0x3B", "请前往 C:\\Windows\\System32\\drivers 删除 AODDriver2.sys 并清理注册表对应服务项"),
+        new("corsairllaccess", "外设灯控", "海盗船 iCUE 底层访问驱动，部分版本与 Windows 内存完整性 (HVCI) 冲突引发蓝屏", "请将 Corsair iCUE 升级到最新版本，或暂时关闭 iCUE 的底层硬件轮询插件"),
+        new("corsairvbus", "外设虚拟总线", "海盗船虚拟设备总线驱动，在设备插拔或睡眠唤醒时可能引发驱动挂死", "建议在设备管理器中检查海盗船虚拟总线驱动版本并更新 iCUE"),
+        new("lgdcore", "外设驱动", "罗技 G HUB 外设/灯控驱动，高并发宏或灯效同步时可能导致 DPC 看门狗超时 (0x133)", "建议重装最新版 Logitech G HUB，若频繁蓝屏可尝试以车载内存模式运行鼠标键盘"),
+        new("rzcommon", "外设驱动", "雷蛇 Synapse 雷云底层驱动，休眠唤醒阶段易引发电源状态超时 (0x9F)", "建议在雷云中关闭不必要的外设联动模块，并更新 Synapse 3 至最新构建"),
+        new("rzdev", "外设驱动", "雷蛇外设硬件驱动，已知部分旧版本在 Windows 快速启动下可能引发 0x3B 蓝屏", "尝试在电源选项中关闭 Windows「快速启动」对比测试，并更新雷蛇驱动"),
+        new("vgk", "游戏反作弊", "Riot Vanguard 反作弊内核驱动，与第三方内存虚拟化、部分杀毒软件或核心隔离强校验易发生冲突", "建议在 BIOS 中开启 VT-x / SVM，关闭第三方杀毒软件内核强防护，或完全重装 Vanguard"),
+        new("easyanticheat", "游戏反作弊", "Easy Anti-Cheat 游戏反作弊，在内存频率或小参不稳定、分页文件损坏时极易触发 0x139 / 0x1A", "若开启了内存超频/XMP，建议稍放宽时序或加 0.02V 内存电压；运行 sfc /scannow 修复系统文件"),
+        new("bedrive", "游戏反作弊", "BattlEye 游戏反作弊，与部分显卡录屏/多层 Overlay 冲突易引发 0x3B 蓝屏", "关闭 Discord / RivaTuner / GeForce Experience 游戏内覆盖层后观察是否复现"),
+        new("acebase", "游戏反作弊", "腾讯 Anti-Cheat Expert 反作弊，部分版本与旧版 Windows 补丁冲突引发 0x50", "检查并安装最新的 Windows 累积安全更新，并在游戏目录执行 AntiCheat 修复工具"),
+        new("mhyprot", "游戏反作弊", "米哈游反作弊驱动，老版本存在与 Windows 核心隔离冲突的已知问题", "确保游戏客户端为最新版本，避免同时运行内核级虚拟机"),
+        new("netwtw", "网络驱动", "Intel 无线网卡驱动老版本，在睡眠唤醒/Wi-Fi 节能切换时存在死锁 Bug，高发 0x9F / 0x133", "强烈建议使用 Intel 驱动支持助理 (IDSA) 将 Wi-Fi 驱动升级至 23.x 以上稳定版"),
+        new("rtwlane", "网络驱动", "Realtek 无线网卡驱动，部分旧版本在长周期高吞吐下载下易触发 0xD1 蓝屏", "前往主板/笔记本官网下载最新 OEM 认证的 Realtek WLAN 驱动覆盖安装"),
+        new("vboxdrv", "虚拟化驱动", "VirtualBox 虚拟机驱动，与 Windows Hyper-V / WSL2 并发开启时易引发内核竞争故障", "若使用 WSL2 或 Windows 沙盒，建议将 VirtualBox 升级到 7.0+ 或关闭冲突特性"),
+    ];
+
+    public static ProblematicDriverRule? Match(string driverName)
+    {
+        if (string.IsNullOrWhiteSpace(driverName)) return null;
+        string name = Path.GetFileNameWithoutExtension(driverName).Trim().ToLowerInvariant();
+        foreach (var rule in _rules)
+        {
+            if (name.StartsWith(rule.Prefix, StringComparison.OrdinalIgnoreCase))
+                return rule;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// 分析崩溃事件的嫌疑驱动与已卸载驱动，若命中高危驱动特征库，生成警报并丰富排障建议
+    /// </summary>
+    public static void EnrichEvent(CrashEvent ev)
+    {
+        var candidates = new List<string>();
+        if (!string.IsNullOrWhiteSpace(ev.SuspectDriver))
+            candidates.Add(ev.SuspectDriver);
+        if (!string.IsNullOrWhiteSpace(ev.FaultingModuleOffset))
+            candidates.Add(ev.FaultingModuleOffset);
+        candidates.AddRange(ev.UnloadedDrivers);
+
+        foreach (var candidate in candidates)
+        {
+            var rule = Match(candidate);
+            if (rule != null)
+            {
+                string cleanName = Path.GetFileNameWithoutExtension(candidate).Trim();
+                int idx = cleanName.IndexOf('[');
+                if (idx > 0) cleanName = cleanName.Substring(0, idx).Trim();
+                idx = cleanName.IndexOf('+');
+                if (idx > 0) cleanName = cleanName.Substring(0, idx).Trim();
+
+                ev.ProblematicDriverWarning = $"⚠️ 命中已知高危/冲突驱动特征 [{cleanName}]（{rule.Category}）：{rule.ProblemDescription}";
+                
+                string tip = $"【高危驱动排查】检测到该崩溃与 {cleanName} ({rule.Category}) 密切相关：{rule.RecommendedAction}";
+                if (!ev.Troubleshooting.Contains(tip))
+                    ev.Troubleshooting.Insert(0, tip);
+                break;
+            }
+        }
+    }
+}

@@ -626,6 +626,28 @@ public static class ReportExporter
                     sb.AppendLine($"<div class=\"row\"><span class=\"k\">嫌疑驱动</span><span class=\"v mono warn\">{Escape(ev.SuspectDriver)}</span></div>");
                 if (!string.IsNullOrWhiteSpace(ev.GpuVendor))
                     sb.AppendLine($"<div class=\"row\"><span class=\"k\">GPU 厂商</span><span class=\"v\">{Escape(ev.GpuVendor)}</span></div>");
+                if (!string.IsNullOrWhiteSpace(ev.ProblematicDriverWarning))
+                    sb.AppendLine($"<div class=\"row\"><span class=\"k\">驱动预警</span><span class=\"v crit\"><b>{Escape(ev.ProblematicDriverWarning)}</b></span></div>");
+                if (ev.UnloadedDrivers.Count > 0)
+                    sb.AppendLine($"<div class=\"row\"><span class=\"k\">已卸载驱动</span><span class=\"v mono note\"><small>{Escape(string.Join(", ", ev.UnloadedDrivers))}</small></span></div>");
+                sb.AppendLine("</div>");
+            }
+
+            // WinDbg 深度解析
+            if (ev.WinDbgOutput != null && (!string.IsNullOrWhiteSpace(ev.WinDbgOutput.FailureBucket) || !string.IsNullOrWhiteSpace(ev.WinDbgOutput.CallStack)))
+            {
+                sb.AppendLine("<div class=\"card\">");
+                sb.AppendLine("<div class=\"title\">⚡ WinDbg 深度符号解析</div>");
+                if (!string.IsNullOrWhiteSpace(ev.WinDbgOutput.FailureBucket))
+                    sb.AppendLine($"<div class=\"row\"><span class=\"k\">故障桶 ID</span><span class=\"v mono crit\">{Escape(ev.WinDbgOutput.FailureBucket)}</span></div>");
+                if (!string.IsNullOrWhiteSpace(ev.WinDbgOutput.ProcessName))
+                    sb.AppendLine($"<div class=\"row\"><span class=\"k\">崩溃进程</span><span class=\"v mono\">{Escape(ev.WinDbgOutput.ProcessName)}</span></div>");
+                if (!string.IsNullOrWhiteSpace(ev.WinDbgOutput.CallStack))
+                {
+                    sb.AppendLine("<div class=\"row\"><span class=\"k\">调用栈</span><span class=\"v\"><pre style=\"background:#0f172a;color:#f8fafc;padding:10px;border-radius:6px;overflow-x:auto;font-family:Consolas,monospace;font-size:12px;line-height:1.4;\">");
+                    sb.AppendLine(Escape(ev.WinDbgOutput.CallStack));
+                    sb.AppendLine("</pre></span></div>");
+                }
                 sb.AppendLine("</div>");
             }
 

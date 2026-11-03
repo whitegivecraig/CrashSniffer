@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -22,11 +23,12 @@ public static class MinidumpParser
 
     // Minidump Stream Types (MINIDUMP_STREAM_TYPE)
     private const uint STREAM_THREAD_LIST = 0x03;
-    private const uint STREAM_MODULE_LIST = 0x04;     // ModuleListStream
-    private const uint STREAM_EXCEPTION = 0x06;       // ExceptionStream
+    private const uint STREAM_MODULE_LIST = 0x04;          // ModuleListStream
+    private const uint STREAM_EXCEPTION = 0x06;            // ExceptionStream
     private const uint STREAM_SYSTEM_INFO = 0x07;
-    private const uint STREAM_BUGCHECK = 0x11;        // BugCheckInfoStream (旧版)
-    private const uint STREAM_BUGCHECK_INFO = 0x15;   // BugCheckInfoStream (新版 0x15)
+    private const uint STREAM_UNLOADED_MODULE_LIST = 0x0E; // UnloadedModuleListStream (14)
+    private const uint STREAM_BUGCHECK = 0x11;             // BugCheckInfoStream (旧版)
+    private const uint STREAM_BUGCHECK_INFO = 0x15;        // BugCheckInfoStream (新版 0x15)
 
     // PAGEDU64 _TRIAGE_DUMP64 每个 _DUMP_DRIVER_ENTRY64 结构体固定 0x90 (144) 字节
     private const int TRIAGE_DRIVER_ENTRY_SIZE = 0x90;
@@ -91,6 +93,22 @@ public static class MinidumpParser
             }
         }
 
+        // 扫描 Windows Error Reporting (WER) 归档目录中的转储及 Report.wer
+        string progData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        string localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string[] werArchives =
+        [
+            Path.Combine(progData, @"Microsoft\Windows\WER\ReportArchive"),
+            Path.Combine(progData, @"Microsoft\Windows\WER\ReportQueue"),
+            Path.Combine(localAppData, @"Microsoft\Windows\WER\ReportArchive"),
+        ];
+
+        foreach (var werDir in werArchives)
+        {
+            if (Directory.Exists(werDir))
+                ScanWerReports(werDir, startTime, endTime, seenFiles, result);
+        }
+
         return result;
     }
 
@@ -122,6 +140,178 @@ public static class MinidumpParser
         }
     }
 
+    private static void ScanWerReports(
+        string werDir,
+        DateTime startTime,
+        DateTime endTime,
+        HashSet<string> seenFiles,
+        List<CrashEvent> result)
+    {
+        try
+        {
+            var dirInfo = new DirectoryInfo(werDir);
+            if (!dirInfo.Exists) return;
+
+            foreach (var subDir in dirInfo.EnumerateDirectories())
+            {
+                try
+                {
+                    // 1. 优先检查是否存在转储文件 (*.dmp, *.mdmp)
+                    var dumpFiles = subDir.EnumerateFiles("*.dmp")
+                        .Concat(subDir.EnumerateFiles("*.mdmp"))
+                        .ToList();
+
+                    bool dumpParsed = false;
+                    foreach (var dmp in dumpFiles)
+                    {
+                        if (seenFiles.Add(dmp.FullName.ToLowerInvariant()))
+                        {
+                            var ev = ParseFile(dmp.FullName);
+                            if (ev != null && (ev.Time >= startTime && ev.Time <= endTime || dmp.LastWriteTime >= startTime && dmp.LastWriteTime <= endTime))
+                            {
+                                result.Add(ev);
+                                dumpParsed = true;
+                            }
+                        }
+                    }
+
+                    // 2. 若无 dmp 文件或 dmp 文件已被系统清理，解析 Report.wer 恢复故障元数据
+                    if (!dumpParsed)
+                    {
+                        string werPath = Path.Combine(subDir.FullName, "Report.wer");
+                        if (File.Exists(werPath) && seenFiles.Add(werPath.ToLowerInvariant()))
+                        {
+                            var fi = new FileInfo(werPath);
+                            if (fi.LastWriteTime >= startTime && fi.LastWriteTime <= endTime)
+                            {
+                                var ev = ParseReportWer(werPath, fi);
+                                if (ev != null && (ev.Time >= startTime && ev.Time <= endTime || fi.LastWriteTime >= startTime && fi.LastWriteTime <= endTime))
+                                {
+                                    result.Add(ev);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { /* 忽略单个子目录访问错误 */ }
+            }
+        }
+        catch { /* 忽略顶层目录访问错误 */ }
+    }
+
+    /// <summary>
+    /// 解析 Windows Error Reporting 生成的 Report.wer 文本报告
+    /// </summary>
+    internal static CrashEvent? ParseReportWer(string werFilePath, FileInfo fi)
+    {
+        try
+        {
+            string[] lines;
+            using (var reader = new StreamReader(werFilePath, Encoding.Unicode, detectEncodingFromByteOrderMarks: true))
+            {
+                var content = reader.ReadToEnd();
+                lines = content.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+            }
+
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var line in lines)
+            {
+                int eq = line.IndexOf('=');
+                if (eq > 0)
+                {
+                    string key = line.Substring(0, eq).Trim();
+                    string val = line.Substring(eq + 1).Trim();
+                    dict[key] = val;
+                }
+            }
+
+            string eventType = dict.GetValueOrDefault("EventType") ?? string.Empty;
+            bool isKernel = eventType.Equals("BlueScreen", StringComparison.OrdinalIgnoreCase)
+                         || eventType.Equals("LiveKernelEvent", StringComparison.OrdinalIgnoreCase)
+                         || eventType.Contains("Kernel", StringComparison.OrdinalIgnoreCase)
+                         || (dict.TryGetValue("Sig[0].Name", out var n0) && n0.Equals("BCCode", StringComparison.OrdinalIgnoreCase));
+
+            // 专注于内核崩溃、硬件挂死与蓝屏事件
+            if (!isKernel)
+                return null;
+
+            var ev = new CrashEvent
+            {
+                Type = eventType.Contains("LiveKernel", StringComparison.OrdinalIgnoreCase) ? CrashType.LiveKernel : CrashType.BSOD,
+                Time = fi.LastWriteTime,
+                DumpPath = werFilePath,
+                DumpSize = fi.Length,
+            };
+            ev.AddDumpPath(werFilePath);
+
+            if (dict.TryGetValue("EventTime", out var eventTimeStr) && ulong.TryParse(eventTimeStr, out ulong ft))
+            {
+                try
+                {
+                    var dt = DateTime.FromFileTimeUtc((long)ft).ToLocalTime();
+                    if (dt.Year >= 2000 && dt <= DateTime.Now.AddDays(1))
+                        ev.Time = dt;
+                }
+                catch { }
+            }
+
+            // 内核蓝屏/实时转储字段解析
+            // Sig[0] 通常为 BCCode，Sig[1..4] 为 BCP1..BCP4
+            uint bcCode = 0;
+            if (dict.TryGetValue("Sig[0].Value", out var bcStr))
+            {
+                if (bcStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                    uint.TryParse(bcStr.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out bcCode);
+                else if (uint.TryParse(bcStr, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var hexVal))
+                    bcCode = hexVal;
+                else
+                    uint.TryParse(bcStr, out bcCode);
+            }
+
+            ulong[] bcp = new ulong[4];
+            for (int i = 1; i <= 4; i++)
+            {
+                if (dict.TryGetValue($"Sig[{i}].Value", out var paramStr))
+                {
+                    if (paramStr.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
+                        ulong.TryParse(paramStr.Substring(2), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out bcp[i - 1]);
+                    else
+                        ulong.TryParse(paramStr, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out bcp[i - 1]);
+                }
+            }
+
+            ev.BugCheckCode = bcCode;
+            ev.BugCheckParams = bcp;
+
+            var info = BugCheckKnowledge.Get(bcCode);
+            ev.StopCode = info.Name;
+            ev.StopCodeChinese = info.Chinese;
+            ev.Troubleshooting.AddRange(info.Suggestions);
+
+            if (dict.TryGetValue("OriginalFilename", out var origFile) && !string.IsNullOrWhiteSpace(origFile))
+                ev.SuspectDriver = origFile;
+            else if (dict.TryGetValue("TargetAppId", out var targetApp) && !string.IsNullOrWhiteSpace(targetApp))
+                ev.SuspectDriver = Path.GetFileName(targetApp);
+
+            if (!string.IsNullOrWhiteSpace(ev.SuspectDriver))
+            {
+                string desc = DriverKnowledge.Describe(ev.SuspectDriver);
+                if (!string.IsNullOrWhiteSpace(desc)) ev.SuspectDriver += $"  [{desc}]";
+                string vendor = DriverKnowledge.GuessGpuVendor(ev.SuspectDriver);
+                if (vendor != "未知") ev.GpuVendor = vendor;
+            }
+
+            ProblematicDriverKnowledge.EnrichEvent(ev);
+            ev.Summary = $"[WER 归档] " + BuildSummary(ev);
+
+            return ev;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     /// <summary>
     /// 解析单个 dump 文件；失败时返回 null
     /// </summary>
@@ -131,6 +321,12 @@ public static class MinidumpParser
         {
             if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
                 return null;
+
+            if (filePath.EndsWith(".wer", StringComparison.OrdinalIgnoreCase))
+            {
+                var fi = new FileInfo(filePath);
+                return ParseReportWer(filePath, fi);
+            }
 
             using var fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
             using var br = new BinaryReader(fs);
@@ -186,6 +382,7 @@ public static class MinidumpParser
 
         BugCheckInfo bugCheck = new();
         List<ModuleInfo> modules = new();
+        List<ModuleInfo> unloadedModules = new();
         uint exceptionCode = 0;
         ulong exceptionAddress = 0;
 
@@ -211,12 +408,25 @@ public static class MinidumpParser
                 {
                     modules = ReadModuleList(br, rva, dataSize);
                 }
+                else if (streamType == STREAM_UNLOADED_MODULE_LIST)
+                {
+                    unloadedModules = ReadUnloadedModuleList(br, rva, dataSize);
+                }
                 else if (streamType == STREAM_EXCEPTION)
                 {
                     (exceptionCode, exceptionAddress) = ReadExceptionStream(br, rva, dataSize);
                 }
             }
             catch { /* ignore bad stream */ }
+        }
+
+        if (unloadedModules.Count > 0)
+        {
+            ev.UnloadedDrivers = unloadedModules
+                .Select(m => Path.GetFileName(m.Name))
+                .Where(n => !string.IsNullOrWhiteSpace(n))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         ev.BugCheckCode = bugCheck.Code;
@@ -233,7 +443,9 @@ public static class MinidumpParser
         if (exceptionAddress != 0) candidates.Add(exceptionAddress);
         candidates.AddRange(ev.BugCheckParams);
 
-        ResolveSuspectAndOffset(ev, modules, bugCheck.DriverName, candidates, Array.Empty<ulong>());
+        ResolveSuspectAndOffset(ev, modules, unloadedModules, bugCheck.DriverName, candidates, Array.Empty<ulong>());
+
+        ProblematicDriverKnowledge.EnrichEvent(ev);
 
         ev.Summary = BuildSummary(ev);
         return ev;
@@ -458,6 +670,15 @@ public static class MinidumpParser
         string explicitDriver,
         IReadOnlyList<ulong> primaryAddresses,
         IReadOnlyList<ulong> stackAddresses)
+        => ResolveSuspectAndOffset(ev, modules, null, explicitDriver, primaryAddresses, stackAddresses);
+
+    private static void ResolveSuspectAndOffset(
+        CrashEvent ev,
+        List<ModuleInfo> modules,
+        List<ModuleInfo>? unloadedModules,
+        string explicitDriver,
+        IReadOnlyList<ulong> primaryAddresses,
+        IReadOnlyList<ulong> stackAddresses)
     {
         string suspect = explicitDriver ?? string.Empty;
         string thirdPartyOffset = string.Empty;
@@ -470,30 +691,45 @@ public static class MinidumpParser
         {
             if (addr == 0) continue;
             var m = FindModuleByAddress(modules, addr);
-            if (m == null) continue;
-
-            string fileName = Path.GetFileName(m.Name);
-            string formattedOffset = $"{fileName}+0x{addr - m.BaseAddr:X}";
-
-            if (!IsCoreKernelModule(fileName) && !IsSubsystemWrapperModule(fileName))
+            if (m != null)
             {
-                if (string.IsNullOrEmpty(thirdPartyOffset))
-                    thirdPartyOffset = formattedOffset;
-                if (string.IsNullOrWhiteSpace(suspect))
-                    suspect = fileName;
-                break;
-            }
-            else if (IsSubsystemWrapperModule(fileName))
-            {
-                if (string.IsNullOrEmpty(subsystemOffset))
+                string fileName = Path.GetFileName(m.Name);
+                string formattedOffset = $"{fileName}+0x{addr - m.BaseAddr:X}";
+
+                if (!IsCoreKernelModule(fileName) && !IsSubsystemWrapperModule(fileName))
                 {
-                    subsystemOffset = formattedOffset;
-                    subsystemDriver = fileName;
+                    if (string.IsNullOrEmpty(thirdPartyOffset))
+                        thirdPartyOffset = formattedOffset;
+                    if (string.IsNullOrWhiteSpace(suspect))
+                        suspect = fileName;
+                    break;
+                }
+                else if (IsSubsystemWrapperModule(fileName))
+                {
+                    if (string.IsNullOrEmpty(subsystemOffset))
+                    {
+                        subsystemOffset = formattedOffset;
+                        subsystemDriver = fileName;
+                    }
+                }
+                else if (string.IsNullOrEmpty(kernelOffset))
+                {
+                    kernelOffset = formattedOffset;
                 }
             }
-            else if (string.IsNullOrEmpty(kernelOffset))
+            else if (unloadedModules != null)
             {
-                kernelOffset = formattedOffset;
+                var um = FindModuleByAddress(unloadedModules, addr);
+                if (um != null)
+                {
+                    string fileName = Path.GetFileName(um.Name);
+                    string formattedOffset = $"{fileName}+0x{addr - um.BaseAddr:X} [已卸载]";
+                    if (string.IsNullOrEmpty(thirdPartyOffset))
+                        thirdPartyOffset = formattedOffset;
+                    if (string.IsNullOrWhiteSpace(suspect))
+                        suspect = $"{fileName} [已卸载]";
+                    break;
+                }
             }
         }
 
@@ -503,26 +739,39 @@ public static class MinidumpParser
             foreach (ulong addr in stackAddresses)
             {
                 var m = FindModuleByAddress(modules, addr);
-                if (m == null) continue;
+                if (m != null)
+                {
+                    string fileName = Path.GetFileName(m.Name);
+                    string formattedOffset = $"{fileName}+0x{addr - m.BaseAddr:X}";
 
-                string fileName = Path.GetFileName(m.Name);
-                string formattedOffset = $"{fileName}+0x{addr - m.BaseAddr:X}";
-
-                if (!IsCoreKernelModule(fileName) && !IsSubsystemWrapperModule(fileName))
-                {
-                    suspect = fileName;
-                    if (string.IsNullOrEmpty(thirdPartyOffset))
-                        thirdPartyOffset = formattedOffset;
-                    break;
+                    if (!IsCoreKernelModule(fileName) && !IsSubsystemWrapperModule(fileName))
+                    {
+                        suspect = fileName;
+                        if (string.IsNullOrEmpty(thirdPartyOffset))
+                            thirdPartyOffset = formattedOffset;
+                        break;
+                    }
+                    if (IsSubsystemWrapperModule(fileName) && string.IsNullOrEmpty(subsystemOffset))
+                    {
+                        subsystemOffset = formattedOffset;
+                        subsystemDriver = fileName;
+                    }
+                    else if (string.IsNullOrEmpty(kernelOffset))
+                    {
+                        kernelOffset = formattedOffset;
+                    }
                 }
-                if (IsSubsystemWrapperModule(fileName) && string.IsNullOrEmpty(subsystemOffset))
+                else if (unloadedModules != null)
                 {
-                    subsystemOffset = formattedOffset;
-                    subsystemDriver = fileName;
-                }
-                else if (string.IsNullOrEmpty(kernelOffset))
-                {
-                    kernelOffset = formattedOffset;
+                    var um = FindModuleByAddress(unloadedModules, addr);
+                    if (um != null)
+                    {
+                        string fileName = Path.GetFileName(um.Name);
+                        suspect = $"{fileName} [已卸载]";
+                        if (string.IsNullOrEmpty(thirdPartyOffset))
+                            thirdPartyOffset = $"{fileName}+0x{addr - um.BaseAddr:X} [已卸载]";
+                        break;
+                    }
                 }
             }
         }
@@ -549,14 +798,15 @@ public static class MinidumpParser
             }
         }
 
-        ev.SuspectDriver = Path.GetFileName(suspect ?? string.Empty);
+        ev.SuspectDriver = suspect ?? string.Empty;
         if (!string.IsNullOrWhiteSpace(ev.SuspectDriver))
         {
-            string desc = DriverKnowledge.Describe(ev.SuspectDriver);
+            string cleanName = ev.SuspectDriver.Replace(" [已卸载]", "").Trim();
+            string desc = DriverKnowledge.Describe(Path.GetFileName(cleanName));
             if (!string.IsNullOrWhiteSpace(desc))
                 ev.SuspectDriver += $"  [{desc}]";
 
-            string vendor = DriverKnowledge.GuessGpuVendor(ev.SuspectDriver);
+            string vendor = DriverKnowledge.GuessGpuVendor(Path.GetFileName(cleanName));
             if (vendor != "未知")
                 ev.GpuVendor = vendor;
         }
@@ -738,6 +988,41 @@ public static class MinidumpParser
             {
                 long entryPos = rva + 4 + (long)i * MODULE_SIZE;
                 if (entryPos + MODULE_SIZE > br.BaseStream.Length) break;
+                br.BaseStream.Position = entryPos;
+                ulong baseAddr = br.ReadUInt64();
+                uint size = br.ReadUInt32();
+                uint checksum = br.ReadUInt32();
+                uint ts = br.ReadUInt32();
+                uint nameRva = br.ReadUInt32();
+                string name = string.Empty;
+                if (nameRva != 0 && nameRva < (ulong)br.BaseStream.Length)
+                    name = ReadMinidumpString(br, nameRva);
+
+                list.Add(new ModuleInfo(baseAddr, size, ts, name));
+            }
+        }
+        catch { /* ignore */ }
+        return list;
+    }
+
+    private static List<ModuleInfo> ReadUnloadedModuleList(BinaryReader br, uint rva, uint dataSize)
+    {
+        var list = new List<ModuleInfo>();
+        try
+        {
+            if (rva + 12 > br.BaseStream.Length) return list;
+            br.BaseStream.Position = rva;
+            uint sizeOfHeader = br.ReadUInt32();
+            uint sizeOfEntry = br.ReadUInt32();
+            uint count = br.ReadUInt32();
+
+            if (sizeOfHeader < 12 || sizeOfEntry < 24 || count == 0 || count > 4096)
+                return list;
+
+            for (int i = 0; i < count; i++)
+            {
+                long entryPos = rva + sizeOfHeader + (long)i * sizeOfEntry;
+                if (entryPos + sizeOfEntry > br.BaseStream.Length) break;
                 br.BaseStream.Position = entryPos;
                 ulong baseAddr = br.ReadUInt64();
                 uint size = br.ReadUInt32();

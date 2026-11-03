@@ -10,10 +10,10 @@
     <AssemblyName>CrashSniffer</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationHighDpiMode>SystemAware</ApplicationHighDpiMode>
-    <Version>2.5.0</Version>
+    <Version>2.6.0</Version>
     <Authors>CrashSniffer</Authors>
     <Product>Windows 系统崩溃诊断与硬件黑匣子工具</Product>
-    <Description>深度解析 Minidump 崩溃偏移、聚合 BSOD/WHEA/TDR/LiveKernel/事件日志，免 WinRing0 实时监控 CPU/主板/GPU/全盘传感器并回放崩溃前曲线，支持系统转储体检、一键生成求诊帖及导出含 .dmp 的现代交互式 HTML/ZIP 报告</Description>
+    <Description>深度解析 Minidump 已卸载驱动与崩溃偏移、聚合 BSOD/WHEA/TDR/LiveKernel/WER，本地对接 WinDbg 深度调用栈，内建高危冲突驱动库，免 WinRing0 实时监控 CPU/主板/GPU/全盘传感器并回放崩溃前曲线，支持系统转储体检、一键生成求诊帖及导出含 .dmp 的现代交互式 HTML/ZIP 报告</Description>
 
     <!-- 体积优化：单文件打包 + 原生库内嵌 + 压缩 + 砍全球化 -->
     <!-- 风险评估：CultureInfo 仅用 InvariantCulture（安全）；无程序集动态加载（安全） -->

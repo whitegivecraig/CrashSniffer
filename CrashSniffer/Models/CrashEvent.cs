@@ -110,6 +110,15 @@ public class CrashEvent
     /// <summary>根据停止代码/嫌疑驱动匹配的排障建议</summary>
     public List<string> Troubleshooting { get; set; } = new();
 
+    /// <summary>事发前已卸载的驱动列表（来自 Minidump UnloadedModuleListStream）</summary>
+    public List<string> UnloadedDrivers { get; set; } = new();
+
+    /// <summary>已知高危/冲突驱动（灯控/反作弊/已知越界漏洞驱动）专项排障警报</summary>
+    public string? ProblematicDriverWarning { get; set; }
+
+    /// <summary>本地 WinDbg / cdb.exe 深度 !analyze -v 输出结果（进阶调试使用）</summary>
+    public CrashSniffer.Services.WinDbgAnalysisResult? WinDbgOutput { get; set; }
+
     /// <summary>向 AllDumpPaths 中去重添加一条转储文件路径</summary>
     public void AddDumpPath(string? path)
     {

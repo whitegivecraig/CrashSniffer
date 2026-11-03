@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
@@ -31,6 +32,7 @@ public class MainForm : Form
     private readonly ToolStripButton _btnExport = new("📦 导出报告包") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false, Font = new Font("Microsoft YaHei UI", 9, FontStyle.Bold) };
     private readonly ToolStripButton _btnExportDump = new("💾 导出转储(.dmp)") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false };
     private readonly ToolStripButton _btnCopyPost = new("📋 复制求助帖") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false };
+    private readonly ToolStripButton _btnWinDbg = new("⚡ WinDbg 深度分析") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false };
     private readonly ToolStripDropDownButton _btnToolbox = new("🛠️ 排障工具箱") { DisplayStyle = ToolStripItemDisplayStyle.Text, AutoToolTip = false };
 
     // 左侧列表顶部实时搜索与类型过滤栏
@@ -148,13 +150,14 @@ public class MainForm : Form
             _btnToday, _btn7d, _btn30d, _btnMonth, _btnAll,
             _sep1, _btnRefresh,
             new ToolStripSeparator(),
-            _btnExport, _btnExportDump, _btnCopyPost,
+            _btnExport, _btnExportDump, _btnCopyPost, _btnWinDbg,
             new ToolStripSeparator(),
             _btnToolbox,
         });
         _btnExport.Enabled = false;
         _btnExportDump.Enabled = false;
         _btnCopyPost.Enabled = false;
+        _btnWinDbg.Enabled = false;
 
         // 快速按钮颜色
         foreach (var b in new[] { _btnToday, _btn7d, _btn30d, _btnMonth, _btnAll })
@@ -163,6 +166,7 @@ public class MainForm : Form
         _btnExport.ForeColor = Color.FromArgb(0x83, 0x18, 0xb4);
         _btnExportDump.ForeColor = Color.FromArgb(0x0e, 0x74, 0x90);
         _btnCopyPost.ForeColor = Color.FromArgb(0x1e, 0x3a, 0x8a);
+        _btnWinDbg.ForeColor = Color.FromArgb(0x04, 0x78, 0x57);
         _btnToolbox.ForeColor = Color.FromArgb(0xb4, 0x53, 0x09);
 
         // 左侧筛选搜索条
@@ -444,6 +448,7 @@ public class MainForm : Form
         _btnExport.Click += (_, _) => DoExport();
         _btnExportDump.Click += (_, _) => DoExportSelectedEventDumps();
         _btnCopyPost.Click += (_, _) => CopySelectedForumPost();
+        _btnWinDbg.Click += (_, _) => DoWinDbgAnalyzeSelectedEvent();
 
         _cmbTypeFilter.SelectedIndexChanged += (_, _) => LoadGrid();
         _txtSearch.TextChanged += (_, _) => LoadGrid();
@@ -727,6 +732,27 @@ public class MainForm : Form
             AppendLine(b, $"  {ev.SuspectDriver}", Color.FromArgb(0x7c, 0x2d, 0x14));
         }
 
+        if (!string.IsNullOrWhiteSpace(ev.ProblematicDriverWarning))
+        {
+            AppendLine(b, "", Color.Black);
+            AppendLine(b, "高危驱动预警：", Color.FromArgb(0xb9, 0x1c, 0x1c), bold: true);
+            AppendLine(b, $"  {ev.ProblematicDriverWarning}", Color.FromArgb(0xb9, 0x1c, 0x1c));
+        }
+
+        if (ev.UnloadedDrivers.Count > 0)
+        {
+            AppendLine(b, "", Color.Black);
+            AppendLine(b, $"崩溃前已卸载驱动 ({ev.UnloadedDrivers.Count} 个)：", Color.FromArgb(0x4b, 0x55, 0x63), bold: true);
+            AppendLine(b, $"  {string.Join(", ", ev.UnloadedDrivers)}", Color.FromArgb(0x4b, 0x55, 0x63));
+        }
+
+        if (ev.WinDbgOutput != null && !string.IsNullOrWhiteSpace(ev.WinDbgOutput.FailureBucket))
+        {
+            AppendLine(b, "", Color.Black);
+            AppendLine(b, "WinDbg 故障桶 (Failure Bucket)：", Color.FromArgb(0x04, 0x78, 0x57), bold: true);
+            AppendLine(b, $"  {ev.WinDbgOutput.FailureBucket}", Color.FromArgb(0x04, 0x78, 0x57));
+        }
+
         // WHEA / GPU
         var w = _tbWhea;
         w.Clear();
@@ -826,6 +852,10 @@ public class MainForm : Form
         // 硬件回放：按崩溃时间匹配快照，并传入事发前环境变更列表联动展示
         var snapshot = FindSnapshotByCrashTime(ev.Time);
         _replayView.LoadSnapshot(snapshot, before);
+
+        bool hasExistingDump = dumps.Any(File.Exists);
+        _btnExportDump.Enabled = hasExistingDump;
+        _btnWinDbg.Enabled = hasExistingDump;
     }
 
     private void CopySelectedForumPost()
@@ -889,6 +919,147 @@ public class MainForm : Form
         }
     }
 
+    private async void DoWinDbgAnalyzeSelectedEvent()
+    {
+        if (_grid.SelectedRows.Count == 0 || _grid.SelectedRows[0].Tag is not CrashEvent ev) return;
+        var paths = ReportExporter.ResolveAllDumpPathsForEvent(ev);
+        var existingDump = paths.FirstOrDefault(p => File.Exists(p) && (p.EndsWith(".dmp", StringComparison.OrdinalIgnoreCase) || p.EndsWith(".mdmp", StringComparison.OrdinalIgnoreCase)));
+
+        if (existingDump == null)
+        {
+            MessageBox.Show(this, "当前选中的事件没有在盘可用的 .dmp 转储文件，无法执行 WinDbg 调用栈解析。", "无可用转储文件", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        if (!WinDbgService.IsAvailable)
+        {
+            var r = MessageBox.Show(this,
+                "未在系统中检测到 Windows SDK 调试器 (cdb.exe / kd.exe) 或 WinDbg Preview。\n\n" +
+                "您可以通过安装以下任一工具获得本地深度调用栈与符号解析能力：\n" +
+                "1. 微软应用商店搜索并安装「WinDbg Preview」（推荐，一键安装）\n" +
+                "2. 安装 Windows 10/11 SDK 并勾选「Debugging Tools for Windows」\n\n" +
+                "是否立即打开 WinDbg Preview 微软商店下载页面？",
+                "未检测到 WinDbg 调试器", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
+
+            if (r == DialogResult.Yes)
+            {
+                try { Process.Start(new ProcessStartInfo("https://aka.ms/windbg") { UseShellExecute = true }); } catch { }
+            }
+            return;
+        }
+
+        _lblStatus.Text = "⏳ 正在通过本地 WinDbg (cdb.exe) 执行 !analyze -v（正在解析符号），请稍候...";
+        _btnWinDbg.Enabled = false;
+
+        try
+        {
+            var result = await WinDbgService.AnalyzeAsync(existingDump);
+            if (!result.Success)
+            {
+                MessageBox.Show(this, $"WinDbg 解析失败：\n{result.ErrorMessage}", "分析失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            ev.WinDbgOutput = result;
+            UpdateDetail();
+
+            ShowWinDbgResultDialog(result, existingDump);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"执行 WinDbg 分析时出错：\n{ex.Message}", "分析异常", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        finally
+        {
+            _btnWinDbg.Enabled = true;
+            _lblStatus.Text = "✅ WinDbg 分析完成";
+        }
+    }
+
+    private void ShowWinDbgResultDialog(WinDbgAnalysisResult res, string dumpPath)
+    {
+        using var dlg = new Form
+        {
+            Text = $"WinDbg 深度解析报告 - {Path.GetFileName(dumpPath)}",
+            Size = new Size(880, 680),
+            StartPosition = FormStartPosition.CenterParent,
+            Font = new Font("Microsoft YaHei UI", 9),
+            BackColor = Color.FromArgb(248, 250, 252),
+            MinimizeBox = false,
+            MaximizeBox = true,
+            ShowIcon = false,
+        };
+
+        var topPanel = new Panel { Dock = DockStyle.Top, Height = 80, Padding = new Padding(12), BackColor = Color.White };
+        var lblTitle = new Label
+        {
+            Text = $"⚡ FAILURE_BUCKET_ID: {res.FailureBucket ?? "未知"}",
+            Font = new Font("Microsoft YaHei UI", 10.5f, FontStyle.Bold),
+            ForeColor = Color.FromArgb(0xb9, 0x1c, 0x1c),
+            Dock = DockStyle.Top,
+            Height = 26
+        };
+        var lblSub = new Label
+        {
+            Text = $"崩溃进程: {res.ProcessName ?? "未知"}  |  转储文件: {Path.GetFileName(dumpPath)}\r\n调用栈捕获: {(string.IsNullOrEmpty(res.CallStack) ? "未匹配到 STACK_TEXT" : "已成功捕获内核调用栈")}",
+            ForeColor = Color.FromArgb(0x4b, 0x55, 0x63),
+            Dock = DockStyle.Fill
+        };
+        topPanel.Controls.Add(lblSub);
+        topPanel.Controls.Add(lblTitle);
+
+        var txtOutput = new TextBox
+        {
+            Multiline = true,
+            ScrollBars = ScrollBars.Both,
+            WordWrap = false,
+            Dock = DockStyle.Fill,
+            ReadOnly = true,
+            BackColor = Color.FromArgb(0x0f, 0x17, 0x2a),
+            ForeColor = Color.FromArgb(0xf8, 0xfa, 0xfc),
+            Font = new Font("Consolas", 10),
+            Text = !string.IsNullOrWhiteSpace(res.CallStack)
+                ? $"=== STACK_TEXT ===\r\n{res.CallStack}\r\n\r\n=== 完整 !analyze -v 原始输出 ===\r\n{res.RawOutput}"
+                : res.RawOutput
+        };
+
+        var bottomPanel = new Panel { Dock = DockStyle.Bottom, Height = 48, Padding = new Padding(10), BackColor = Color.White };
+        var btnCopy = new Button
+        {
+            Text = "📋 复制完整输出",
+            Width = 130,
+            Dock = DockStyle.Right,
+            BackColor = Color.FromArgb(0x1d, 0x4e, 0xd9),
+            ForeColor = Color.White,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnCopy.FlatAppearance.BorderSize = 0;
+        btnCopy.Click += (_, _) =>
+        {
+            Clipboard.SetText(txtOutput.Text);
+            MessageBox.Show(dlg, "已将 WinDbg 深度分析报告完整复制到剪贴板！", "复制成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        };
+
+        var btnClose = new Button
+        {
+            Text = "关闭",
+            Width = 90,
+            Dock = DockStyle.Right,
+            FlatStyle = FlatStyle.Flat
+        };
+        btnClose.Click += (_, _) => dlg.Close();
+
+        bottomPanel.Controls.Add(btnCopy);
+        bottomPanel.Controls.Add(new Panel { Dock = DockStyle.Right, Width = 10 });
+        bottomPanel.Controls.Add(btnClose);
+
+        dlg.Controls.Add(txtOutput);
+        dlg.Controls.Add(bottomPanel);
+        dlg.Controls.Add(topPanel);
+
+        dlg.ShowDialog(this);
+    }
+
     /// <summary>
     /// 按崩溃时间查找硬件快照（2 分钟容差，取时间最接近的一份）。
     /// 没有落盘快照时回退到后台连续采样，覆盖重启后才被扫描到的崩溃。
@@ -920,6 +1091,8 @@ public class MainForm : Form
         foreach (var tb in new[] { _tbBsod, _tbWhea, _tbSuggest, _tbRaw, _tbChanges }) tb.Clear();
         _gridRelated.Rows.Clear();
         _replayView.LoadSnapshot(null);
+        _btnExportDump.Enabled = false;
+        _btnWinDbg.Enabled = false;
     }
 
     private async void DoExport()
@@ -1002,10 +1175,11 @@ public class MainForm : Form
         _btnExport.Enabled = !busy && _events.Count > 0;
         _btnExportDump.Enabled = !busy && _events.Count > 0;
         _btnCopyPost.Enabled = !busy && _events.Count > 0;
+        _btnWinDbg.Enabled = !busy && _events.Count > 0;
         _dtpStart.Enabled = !busy;
         _dtpEnd.Enabled = !busy;
         foreach (ToolStripItem it in _topToolStrip.Items)
-            if (it is ToolStripButton && it != _btnExport && it != _btnExportDump && it != _btnCopyPost)
+            if (it is ToolStripButton && it != _btnExport && it != _btnExportDump && it != _btnCopyPost && it != _btnWinDbg)
                 it.Enabled = !busy;
         _lblStatus.Text = statusText;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
